@@ -13,6 +13,9 @@
 | `client/core/controllers/gatewayController.cpp` | ключ шлюза из `mayak_build.h` |
 | `client/core/repositories/secureAppSettingsRepository.cpp` | адрес шлюза по умолчанию |
 | `client/android/…` | пакет `ru.mayaklight.vpn` — ставится рядом с AmneziaVPN |
+| `mayak/lighthouse.svg` | исходник значка; из него сделаны значки Android и логотип в приложении (`client/images/amneziaLogo.svg`) |
+| `mayak/rebrand_strings.py` | замена названия в строках интерфейса: код и `<source>` во всех `.ts` меняются одинаково, русский перевод — свой |
+| `client/android/res/…` | значки, фон значка, силуэт для уведомлений, названия в системных строках |
 | `.github/workflows/mayak.yml` | сборка APK; исходная сборка Amnezia (`deploy.yml`) запускается только вручную |
 
 ## Как работает подключение

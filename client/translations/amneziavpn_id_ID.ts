@@ -477,7 +477,7 @@ Ditemukan container yang sudah terpasang di server. Semua container yang terpasa
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="57"/>
         <location filename="../ui/utils/notificationHandler.cpp" line="64"/>
-        <source>AmneziaVPN</source>
+        <source>Mayak VPN</source>
         <translation>AmneziaVPN</translation>
     </message>
     <message>
@@ -492,7 +492,7 @@ Ditemukan container yang sudah terpasang di server. Semua container yang terpasa
     </message>
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="88"/>
-        <source>AmneziaVPN notification</source>
+        <source>Mayak VPN notification</source>
         <translation>Notifikasi AmneziaVPN</translation>
     </message>
     <message>
@@ -3380,7 +3380,7 @@ Buat satu dari pengaturan saat ini.</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettings.qml" line="178"/>
-        <source>About AmneziaVPN</source>
+        <source>About Mayak VPN</source>
         <translation>Tentang AmneziaVPN</translation>
     </message>
     <message>
@@ -3393,7 +3393,7 @@ Buat satu dari pengaturan saat ini.</translation>
     <name>PageSettingsAbout</name>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsAbout.qml" line="21"/>
-        <source>You have the latest version of AmneziaVPN</source>
+        <source>You have the latest version of Mayak VPN</source>
         <translation>Anda memiliki versi terbaru AmneziaVPN</translation>
     </message>
     <message>
@@ -6163,9 +6163,8 @@ Buat satu dari pengaturan saat ini.</translation>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="132"/>
-        <source>Your Amnezia Premium subscription has expired.
- Please check your email for renewal instructions.
- If you haven&apos;t received an email, please contact our support.</source>
+        <source>Your Mayak VPN access has expired.
+ Please contact the administrator to renew it.</source>
         <translation>Langganan Amnezia Premium Anda telah kedaluwarsa.
  Silakan periksa email Anda untuk petunjuk perpanjangan.
  Jika Anda belum menerima email, silakan hubungi dukungan kami.</translation>
@@ -6232,7 +6231,7 @@ Buat satu dari pengaturan saat ini.</translation>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="98"/>
-        <source>Amnezia helper service error</source>
+        <source>Mayak VPN helper service error</source>
         <translation>Kesalahan layanan helper Amnezia</translation>
     </message>
     <message>

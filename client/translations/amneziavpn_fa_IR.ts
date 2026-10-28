@@ -782,7 +782,7 @@ Already installed containers were found on the server. All installed containers 
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="57"/>
         <location filename="../ui/utils/notificationHandler.cpp" line="64"/>
-        <source>AmneziaVPN</source>
+        <source>Mayak VPN</source>
         <translation>AmneziaVPN</translation>
     </message>
     <message>
@@ -797,7 +797,7 @@ Already installed containers were found on the server. All installed containers 
     </message>
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="88"/>
-        <source>AmneziaVPN notification</source>
+        <source>Mayak VPN notification</source>
         <translation>اخطار AmneziaVPN</translation>
     </message>
     <message>
@@ -3363,7 +3363,7 @@ Create one from the current settings.</source>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettings.qml" line="135"/>
-        <source>About AmneziaVPN</source>
+        <source>About Mayak VPN</source>
         <translation>درباره Amnezia</translation>
     </message>
     <message>
@@ -3376,7 +3376,7 @@ Create one from the current settings.</source>
     <name>PageSettingsAbout</name>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsAbout.qml" line="22"/>
-        <source>You have the latest version of AmneziaVPN</source>
+        <source>You have the latest version of Mayak VPN</source>
         <translation>آخرین نسخه AmneziaVPN را دارید</translation>
     </message>
     <message>
@@ -6480,7 +6480,7 @@ Only one can be active at a time: VPN or local proxy</source>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="98"/>
-        <source>Amnezia helper service error</source>
+        <source>Mayak VPN helper service error</source>
         <translation>خطای سرویس کمکی Amnezia</translation>
     </message>
     <message>
@@ -6592,9 +6592,8 @@ Only one can be active at a time: VPN or local proxy</source>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="132"/>
-        <source>Your Amnezia Premium subscription has expired.
- Please check your email for renewal instructions.
- If you haven&apos;t received an email, please contact our support.</source>
+        <source>Your Mayak VPN access has expired.
+ Please contact the administrator to renew it.</source>
         <translation>اشتراک Amnezia Premium شما منقضی شده است.
  لطفاً ایمیل خود را برای دستورالعمل‌های تمدید بررسی کنید.
  اگر ایمیلی دریافت نکرده‌اید، با پشتیبانی ما تماس بگیرید.</translation>

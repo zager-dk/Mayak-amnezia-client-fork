@@ -123,7 +123,7 @@ PageType {
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
-                text: qsTr("About AmneziaVPN")
+                text: qsTr("About Mayak VPN")
                 icon.source: "qrc:/images/controls/amnezia.svg"
                 trailingIconSource: "qrc:/images/controls/chevron-right.svg"
 

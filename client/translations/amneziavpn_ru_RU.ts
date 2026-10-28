@@ -783,8 +783,8 @@ Already installed containers were found on the server. All installed containers 
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="57"/>
         <location filename="../ui/utils/notificationHandler.cpp" line="64"/>
-        <source>AmneziaVPN</source>
-        <translation>AmneziaVPN</translation>
+        <source>Mayak VPN</source>
+        <translation>Маяк VPN</translation>
     </message>
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="58"/>
@@ -798,8 +798,8 @@ Already installed containers were found on the server. All installed containers 
     </message>
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="88"/>
-        <source>AmneziaVPN notification</source>
-        <translation>Уведомление AmneziaVPN</translation>
+        <source>Mayak VPN notification</source>
+        <translation>Уведомление Маяк VPN</translation>
     </message>
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="89"/>
@@ -3364,8 +3364,8 @@ Create one from the current settings.</source>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettings.qml" line="135"/>
-        <source>About AmneziaVPN</source>
-        <translation>Об AmneziaVPN</translation>
+        <source>About Mayak VPN</source>
+        <translation>О приложении Маяк VPN</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettings.qml" line="150"/>
@@ -3377,8 +3377,8 @@ Create one from the current settings.</source>
     <name>PageSettingsAbout</name>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsAbout.qml" line="22"/>
-        <source>You have the latest version of AmneziaVPN</source>
-        <translation>У вас установлена последняя версия AmneziaVPN</translation>
+        <source>You have the latest version of Mayak VPN</source>
+        <translation>У вас последняя версия Маяк VPN</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsAbout.qml" line="26"/>
@@ -6439,12 +6439,10 @@ Only one can be active at a time: VPN or local proxy</source>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="132"/>
-        <source>Your Amnezia Premium subscription has expired.
- Please check your email for renewal instructions.
- If you haven&apos;t received an email, please contact our support.</source>
-        <translation>Ваша подписка Amnezia Premium истекла.
-Проверьте свою почту для инструкций по продлению.
-Если вы не получили письмо, пожалуйста, свяжитесь с нашей службой поддержки.</translation>
+        <source>Your Mayak VPN access has expired.
+ Please contact the administrator to renew it.</source>
+        <translation>Срок доступа к Маяк VPN закончился.
+Напишите администратору, чтобы продлить.</translation>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="133"/>
@@ -6508,8 +6506,8 @@ Only one can be active at a time: VPN or local proxy</source>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="98"/>
-        <source>Amnezia helper service error</source>
-        <translation>Ошибка вспомогательной службы Amnezia</translation>
+        <source>Mayak VPN helper service error</source>
+        <translation>Ошибка вспомогательной службы Маяк VPN</translation>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="99"/>

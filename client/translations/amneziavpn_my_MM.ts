@@ -782,7 +782,7 @@ Already installed containers were found on the server. All installed containers 
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="57"/>
         <location filename="../ui/utils/notificationHandler.cpp" line="64"/>
-        <source>AmneziaVPN</source>
+        <source>Mayak VPN</source>
         <translation>AmneziaVPN</translation>
     </message>
     <message>
@@ -797,7 +797,7 @@ Already installed containers were found on the server. All installed containers 
     </message>
     <message>
         <location filename="../ui/utils/notificationHandler.cpp" line="88"/>
-        <source>AmneziaVPN notification</source>
+        <source>Mayak VPN notification</source>
         <translation>AmneziaVPN နိုတီ</translation>
     </message>
     <message>
@@ -3363,7 +3363,7 @@ Create one from the current settings.</source>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettings.qml" line="135"/>
-        <source>About AmneziaVPN</source>
+        <source>About Mayak VPN</source>
         <translation>AmneziaVPN အကြောင်း</translation>
     </message>
     <message>
@@ -3376,7 +3376,7 @@ Create one from the current settings.</source>
     <name>PageSettingsAbout</name>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsAbout.qml" line="22"/>
-        <source>You have the latest version of AmneziaVPN</source>
+        <source>You have the latest version of Mayak VPN</source>
         <translation>သင့်တွင် AmneziaVPN ၏ နောက်ဆုံးဗားရှင်း ရှိပြီးဖြစ်ပါသည်</translation>
     </message>
     <message>
@@ -6335,9 +6335,8 @@ Only one can be active at a time: VPN or local proxy</source>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="132"/>
-        <source>Your Amnezia Premium subscription has expired.
- Please check your email for renewal instructions.
- If you haven&apos;t received an email, please contact our support.</source>
+        <source>Your Mayak VPN access has expired.
+ Please contact the administrator to renew it.</source>
         <translation>သင်၏ Amnezia Premium အသင်းဝင်မှု သက်တမ်းကုန်သွားပါပြီ။
  သက်တမ်းတိုးရန် လမ်းညွှန်ချက်များအတွက် သင့်အီးမေးလ်ကို စစ်ဆေးပါ။
  အီးမေးလ် မရရှိပါက ကျွန်ုပ်တို့၏ ကူညီရေးအဖွဲ့ကို ဆက်သွယ်ပါ။</translation>
@@ -6484,7 +6483,7 @@ Only one can be active at a time: VPN or local proxy</source>
     </message>
     <message>
         <location filename="../core/utils/errorStrings.cpp" line="98"/>
-        <source>Amnezia helper service error</source>
+        <source>Mayak VPN helper service error</source>
         <translation>Amnezia helper ဝန်ဆောင်မှု မှားယွင်းမှု</translation>
     </message>
     <message>
