@@ -79,7 +79,7 @@ private const val CHECK_NOTIFICATION_PERMISSION_ACTION_CODE = 4
 private const val PREFS_NOTIFICATION_PERMISSION_ASKED = "NOTIFICATION_PERMISSION_ASKED"
 private const val OPEN_FILE_AFTER_RESUME_DELAY_MS = 400L
 private const val KEY_PENDING_OPEN_FILE_URI = "pending_open_file_uri"
-private const val FILE_PROVIDER_AUTHORITY = "org.amnezia.vpn.qtprovider"
+private const val FILE_PROVIDER_AUTHORITY_SUFFIX = ".qtprovider"
 
 class AmneziaActivity : QtActivity() {
 
@@ -787,7 +787,7 @@ class AmneziaActivity : QtActivity() {
         Log.d(TAG, "Share file $path, $mime")
         mainScope.launch {
             val uri = try {
-                FileProvider.getUriForFile(this@AmneziaActivity, FILE_PROVIDER_AUTHORITY, File(path))
+                FileProvider.getUriForFile(this@AmneziaActivity, packageName + FILE_PROVIDER_AUTHORITY_SUFFIX, File(path))
             } catch (e: IllegalArgumentException) {
                 Log.e(TAG, "Failed to share file $path: $e")
                 return@launch

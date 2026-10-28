@@ -1,5 +1,8 @@
 get_filename_component(_CLIENT_SRC_DIR "${CMAKE_CURRENT_LIST_DIR}/.." ABSOLUTE)
 
+# Маяк: названия приложения задаются в mayak/branding.cmake (раньше значений по умолчанию)
+include(${CMAKE_CURRENT_LIST_DIR}/../../mayak/branding.cmake OPTIONAL)
+
 include(${CMAKE_CURRENT_LIST_DIR}/branding/common.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/branding/apple.cmake)
 include(${CMAKE_CURRENT_LIST_DIR}/branding/ios.cmake)

@@ -37,7 +37,8 @@ android {
     val abiList = qtTargetAbiList.split(",")
 
     defaultConfig {
-        applicationId = "org.amnezia.vpn"
+        // Маяк: своё имя пакета — ставится рядом с AmneziaVPN, не заменяя его
+        applicationId = "ru.mayaklight.vpn"
         targetSdk = qtTargetSdkVersion.toInt()
 
         // keeps language resources for only the locales specified below

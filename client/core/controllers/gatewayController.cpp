@@ -1,4 +1,5 @@
 #include "gatewayController.h"
+#include "mayak_build.h"
 
 #include <QDebug>
 #include <QEventLoop>
@@ -85,7 +86,8 @@ GatewayController::GatewayController(const QString &gatewayEndpoint, const bool 
       m_isStrictKillSwitchEnabled(isStrictKillSwitchEnabled),
       m_appSettingsRepository(appSettingsRepository)
 {
-    const QByteArray publicKey = isDevEnvironment ? QByteArray(DEV_AGW_PUBLIC_KEY) : QByteArray(PROD_AGW_PUBLIC_KEY);
+    // Маяк: ключ нашего шлюза вшит при сборке (mayak/mayak.cmake → mayak_build.h).
+    const QByteArray publicKey = isDevEnvironment ? QByteArray(DEV_AGW_PUBLIC_KEY) : QByteArray(MAYAK_AGW_PUBLIC_KEY);
     m_publicKeyMissing = publicKey.isEmpty();
 
     QStringList primaryEndpoints;

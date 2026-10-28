@@ -1,0 +1,126 @@
+name: 'Маяк: сборка приложения'
+
+# Сборки приложения Маяк VPN. Запускаются при изменениях в ветке mayak или вручную (Actions → Run workflow).
+on:
+  push:
+    branches: [ mayak ]
+  workflow_dispatch:
+
+env:
+  QT_MIRROR: https://mirrors.ocf.berkeley.edu/qt/
+  # Откуда взять открытый ключ шлюза, если его нет в mayak/gateway_public.pem
+  MAYAK_KEY_URL: https://mayaklight.ru/gw/public-key
+
+jobs:
+  Android:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    env:
+      QT_VERSION: '6.10.3'
+      QT_MODULES: 'qtremoteobjects qt5compat qtimageformats qtshadertools'
+      ANDROID_PLATFORM: android-28
+      NDK_VERSION: 27.0.11718014
+      APP_ANDROID_MIN_SDK: 28
+
+    steps:
+    - name: 'Освободить место на диске'
+      run: |
+        sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /usr/local/share/boost /opt/hostedtoolcache/CodeQL || true
+        df -h /
+
+    - name: 'Исходники'
+      uses: actions/checkout@v4
+      with:
+        submodules: 'true'
+
+    - name: 'Ключ шлюза Маяка'
+      shell: bash
+      run: |
+        if [ ! -s mayak/gateway_public.pem ]; then
+          curl -fsS --retry 3 "$MAYAK_KEY_URL" -o mayak/gateway_public.pem
+        fi
+        head -1 mayak/gateway_public.pem
+        grep -q "BEGIN PUBLIC KEY" mayak/gateway_public.pem
+
+    - name: 'Qt для сборки'
+      uses: jurplel/install-qt-action@v4.3.1
+      with:
+        version: ${{ env.QT_VERSION }}
+        host: 'linux'
+        target: 'desktop'
+        arch: 'linux_gcc_64'
+        modules: ${{ env.QT_MODULES }}
+        dir: ${{ runner.temp }}
+        py7zrversion: '==0.22.*'
+        extra: '--base ${{ env.QT_MIRROR }}'
+
+    - name: 'Qt для Android arm64'
+      uses: jurplel/install-qt-action@v4.3.1
+      with:
+        version: ${{ env.QT_VERSION }}
+        host: 'all_os'
+        target: 'android'
+        arch: 'android_arm64_v8a'
+        modules: ${{ env.QT_MODULES }}
+        dir: ${{ runner.temp }}
+        py7zrversion: '==0.22.*'
+        extra: '--base ${{ env.QT_MIRROR }}'
+
+    - name: 'Java'
+      uses: actions/setup-java@v4
+      with:
+        distribution: 'temurin'
+        java-version: '17'
+
+    - name: 'Android SDK'
+      uses: android-actions/setup-android@v4
+      with:
+        packages: "platforms;${{ env.ANDROID_PLATFORM }} ndk;${{ env.NDK_VERSION }}"
+
+    - name: 'Python и conan'
+      uses: actions/setup-python@v6
+      with:
+        python-version: 3.14
+    - run: pip install "conan==2.28.0"
+
+    # Подпись: постоянный ключ из секрета MAYAK_ANDROID_KEYSTORE_BASE64 (+ MAYAK_ANDROID_KEYSTORE_PASS).
+    # Без секрета — временный ключ: приложение ставится, но обновление поверх потребует переустановки.
+    - name: 'Ключ подписи'
+      shell: bash
+      env:
+        KEYSTORE_BASE64: ${{ secrets.MAYAK_ANDROID_KEYSTORE_BASE64 }}
+        KEYSTORE_PASS: ${{ secrets.MAYAK_ANDROID_KEYSTORE_PASS }}
+      run: |
+        if [ -n "$KEYSTORE_BASE64" ]; then
+          echo "$KEYSTORE_BASE64" | base64 --decode > android.keystore
+          echo "QT_ANDROID_KEYSTORE_STORE_PASS=$KEYSTORE_PASS" >> $GITHUB_ENV
+          echo "Подпись постоянным ключом"
+        else
+          PASS=$(openssl rand -hex 16)
+          keytool -genkeypair -keystore android.keystore -alias mayak -keyalg RSA -keysize 2048 -validity 3650 \
+            -storepass "$PASS" -keypass "$PASS" -dname "CN=Mayak VPN test" >/dev/null
+          echo "::add-mask::$PASS"
+          echo "QT_ANDROID_KEYSTORE_STORE_PASS=$PASS" >> $GITHUB_ENV
+          echo "::warning::Временный ключ подписи: добавьте секрет MAYAK_ANDROID_KEYSTORE_BASE64, чтобы обновления ставились поверх"
+        fi
+        echo "QT_ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android.keystore" >> $GITHUB_ENV
+        echo "QT_ANDROID_KEYSTORE_ALIAS=mayak" >> $GITHUB_ENV
+
+    - name: 'Сборка'
+      shell: bash
+      env:
+        QT_INSTALL_DIR: ${{ runner.temp }}
+      run: |
+        deploy/build.sh -t android --sign --abi arm64-v8a
+        VERSION=$(grep CMAKE_PROJECT_VERSION:STATIC deploy/build/CMakeCache.txt | cut -d= -f2)
+        mkdir -p out
+        cp deploy/build/client/android-build/*.apk "out/MayakVPN_${VERSION}_android_arm64.apk"
+        ls -l out
+
+    - name: 'APK'
+      uses: actions/upload-artifact@v7
+      with:
+        name: mayak-android
+        path: out/*.apk
+        retention-days: 30

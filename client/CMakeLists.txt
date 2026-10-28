@@ -25,7 +25,9 @@ execute_process(
 
 add_definitions(-DGIT_COMMIT_HASH="${GIT_COMMIT_HASH}")
 
-add_definitions(-DPROD_AGW_PUBLIC_KEY="$ENV{PROD_AGW_PUBLIC_KEY}")
+# Маяк: адрес шлюза и его открытый ключ. Ключ берётся из переменной окружения или из mayak/gateway_public.pem.
+include(${CMAKE_SOURCE_DIR}/mayak/mayak.cmake)
+add_definitions(-DPROD_AGW_PUBLIC_KEY="")
 add_definitions(-DPROD_S3_ENDPOINT="$ENV{PROD_S3_ENDPOINT}")
 add_definitions(-DFALLBACK_S3_ENDPOINT="$ENV{FALLBACK_S3_ENDPOINT}")
 

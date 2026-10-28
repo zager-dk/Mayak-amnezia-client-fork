@@ -1,9 +1,8 @@
 name: 'Deploy workflow'
 
+# Маяк: сборки Amnezia (их собственные раннеры и секреты) в форке выключены — свои сборки в mayak.yml.
 on:
-  push:
-    branches:
-      - '**'
+  workflow_dispatch:
 
 env:
   QT_MIRROR: https://mirrors.ocf.berkeley.edu/qt/ # https://download.qt.io/static/mirrorlist/

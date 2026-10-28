@@ -1,4 +1,5 @@
 #include "secureAppSettingsRepository.h"
+#include "mayak_build.h"
 
 #include <QJsonDocument>
 #include <QJsonArray>
@@ -17,7 +18,8 @@
 using namespace amnezia;
 
 namespace {
-    constexpr char gatewayEndpoint[] = "http://gw.amnezia.org:80/";
+    // Маяк: шлюз подписки на нашем сервере (адрес — из mayak_build.h) (протокол тот же, что у шлюза Amnezia).
+    constexpr char gatewayEndpoint[] = MAYAK_GATEWAY_ENDPOINT;
 }
 
 SecureAppSettingsRepository::SecureAppSettingsRepository(SecureQSettings* settings, QObject *parent)
