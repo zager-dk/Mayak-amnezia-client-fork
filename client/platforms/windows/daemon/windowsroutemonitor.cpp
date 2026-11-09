@@ -68,7 +68,13 @@ WindowsRouteMonitor::WindowsRouteMonitor(quint64 luid, QObject* parent)
 
 WindowsRouteMonitor::~WindowsRouteMonitor() {
   MZ_COUNT_DTOR(WindowsRouteMonitor);
-  CancelMibChangeNotify2(m_routeHandle);
+  cleanup();
+  // Final destruction only follows successful explicit cleanup in the owner.
+  // Release any remaining allocations on process shutdown.
+  qDeleteAll(m_exclusionRoutes);
+  qDeleteAll(m_clonedRoutes);
+  m_exclusionRoutes.clear();
+  m_clonedRoutes.clear();
 
   flushRouteTable(m_exclusionRoutes);
   flushRouteTable(m_clonedRoutes);
@@ -436,17 +442,17 @@ bool WindowsRouteMonitor::deleteExclusionRoute(const IPAddress& prefix) {
   logger.debug() << "Deleting exclusion route for"
                  << prefix.address().toString();
 
-  MIB_IPFORWARD_ROW2* data = m_exclusionRoutes.take(prefix);
+  MIB_IPFORWARD_ROW2* data = m_exclusionRoutes.value(prefix, nullptr);
   if (data == nullptr) {
     return true;
   }
 
-  DWORD result = DeleteIpForwardEntry2(data);
+  DWORD result = data->InterfaceLuid.Value == 0 ? NO_ERROR : DeleteIpForwardEntry2(data);
   if ((result != ERROR_NOT_FOUND) && (result != NO_ERROR)) {
-    logger.error() << "Failed to delete route to"
-                   << prefix.toString()
-                   << "result:" << result;
+    logger.error() << "Failed to delete route, result:" << result;
+    return false;
   }
+  m_exclusionRoutes.remove(prefix);
 
   // Captured routes might have changed.
   updateCapturedRoutes(data->DestinationPrefix.Prefix.si_family);
@@ -455,19 +461,34 @@ bool WindowsRouteMonitor::deleteExclusionRoute(const IPAddress& prefix) {
   return true;
 }
 
-void WindowsRouteMonitor::flushRouteTable(
-    QHash<IPAddress, MIB_IPFORWARD_ROW2*>& table) {
-  for (auto i = table.begin(); i != table.end(); i++) {
-    MIB_IPFORWARD_ROW2* data = i.value();
-    DWORD result = DeleteIpForwardEntry2(data);
-    if ((result != ERROR_NOT_FOUND) && (result != NO_ERROR)) {
-      logger.error() << "Failed to delete route to"
-                     << i.key().toString()
-                     << "result:" << result;
-    }
-    delete data;
+bool WindowsRouteMonitor::cleanup() {
+  m_cleaningUp = true;
+  m_defaultRouteCapture = false;
+  if (m_routeHandle != INVALID_HANDLE_VALUE) {
+    if (CancelMibChangeNotify2(m_routeHandle) != NO_ERROR) return false;
+    m_routeHandle = INVALID_HANDLE_VALUE;
   }
-  table.clear();
+  const bool exclusions = flushRouteTable(m_exclusionRoutes);
+  const bool clones = flushRouteTable(m_clonedRoutes);
+  return exclusions && clones;
+}
+
+bool WindowsRouteMonitor::flushRouteTable(
+    QHash<IPAddress, MIB_IPFORWARD_ROW2*>& table) {
+  bool success = true;
+  for (auto i = table.begin(); i != table.end();) {
+    MIB_IPFORWARD_ROW2* data = i.value();
+    DWORD result = data->InterfaceLuid.Value == 0 ? NO_ERROR : DeleteIpForwardEntry2(data);
+    if ((result != ERROR_NOT_FOUND) && (result != NO_ERROR)) {
+      logger.error() << "Failed to delete route, result:" << result;
+      success = false;
+      ++i;
+    } else {
+      delete data;
+      i = table.erase(i);
+    }
+  }
+  return success;
 }
 
 void WindowsRouteMonitor::setDetaultRouteCapture(bool enable) {
@@ -481,6 +502,7 @@ void WindowsRouteMonitor::setDetaultRouteCapture(bool enable) {
 }
 
 void WindowsRouteMonitor::routeChanged() {
+  if (m_cleaningUp) return;
   logger.debug() << "Routes changed";
 
   PMIB_IPFORWARD_TABLE2 table;

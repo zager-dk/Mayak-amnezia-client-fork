@@ -23,6 +23,7 @@ class MayakAutoConnectRuntime;
 class ConnectionController : public QObject
 {
     Q_OBJECT
+    Q_PROPERTY(bool cleanupPending READ managedCleanupPending NOTIFY connectionStateChanged)
 
 public:
     explicit ConnectionController(SecureServersRepository* serversRepository,
@@ -67,6 +68,8 @@ public:
     bool isMayakManaged(const QString& serverId) const;
     bool isMayakActive() const { return m_managedActive; }
     QString managedMessage() const;
+    bool managedCleanupPending() const;
+    void retryManagedCleanup();
     bool canInstallUpdate() const;
 
 signals:

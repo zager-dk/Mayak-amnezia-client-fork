@@ -85,8 +85,9 @@ void WindowsDaemon::activateSplitTunnel(const InterfaceConfig& config, int vpnAd
           logger.error() << "Split tunnel did not reach running state";
           emit backendFailure(DaemonError::ERROR_SPLIT_TUNNEL_START_FAILURE);
       }
-  } else {
-      m_splitTunnelManager->stop();
+  } else if (!m_splitTunnelManager->stop()) {
+      logger.error() << "Failed to stop split tunnel";
+      emit backendFailure();
   }
 }
 
@@ -104,8 +105,7 @@ bool WindowsDaemon::run(Op op, const InterfaceConfig& config) {
   }
 
   if (op == Down) {
-    m_splitTunnelManager->stop();
-    return true;
+    return m_splitTunnelManager->stop();
   }
   if (config.m_vpnDisabledApps.length() > 0) {
     if (!m_splitTunnelManager->start(m_inetAdapterIndex)) {
@@ -126,9 +126,7 @@ bool WindowsDaemon::run(Op op, const InterfaceConfig& config) {
     }
     return true;
   }
-  m_splitTunnelManager->stop();
-
-  return true;
+  return m_splitTunnelManager->stop();
 }
 
 void WindowsDaemon::monitorBackendFailure() {

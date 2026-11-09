@@ -370,30 +370,16 @@ bool WindowsFirewall::enablePeerTraffic(const InterfaceConfig& config) {
 
 bool WindowsFirewall::disablePeerTraffic(const QString& pubkey) {
   auto result = FwpmTransactionBegin(m_sessionHandle, NULL);
-  auto cleanup = qScopeGuard([&] {
-    if (result != ERROR_SUCCESS) {
-      FwpmTransactionAbort0(m_sessionHandle);
-    }
-  });
-  if (result != ERROR_SUCCESS) {
-    logger.error() << "FwpmTransactionBegin0 failed. Return value:.\n"
-                   << result;
-    return false;
+  if (result != ERROR_SUCCESS) return false;
+  auto cleanup = qScopeGuard([&] { FwpmTransactionAbort0(m_sessionHandle); });
+  for (const auto filterID : m_peerRules.values(pubkey)) {
+    result = FwpmFilterDeleteById0(m_sessionHandle, filterID);
+    if (result != ERROR_SUCCESS && result != FWP_E_FILTER_NOT_FOUND) return false;
   }
-
-  logger.info() << "Disabling traffic for peer" << pubkey;
-  for (const auto& filterID : m_peerRules.values(pubkey)) {
-    FwpmFilterDeleteById0(m_sessionHandle, filterID);
-    m_peerRules.remove(pubkey, filterID);
-  }
-
-  // Commit!
-  result = FwpmTransactionCommit0(m_sessionHandle);
-  if (result != ERROR_SUCCESS) {
-    logger.error() << "FwpmTransactionCommit0 failed. Return value:.\n"
-                   << result;
-    return false;
-  }
+  if (FwpmTransactionCommit0(m_sessionHandle) != ERROR_SUCCESS) return false;
+  cleanup.dismiss();
+  // A failed/aborted transaction must retain every teardown input for retry.
+  m_peerRules.remove(pubkey);
   return true;
 }
 
@@ -402,37 +388,22 @@ bool WindowsFirewall::disableKillSwitch() {
 }
 
 bool WindowsFirewall::allowAllTraffic() {
-    auto result = FwpmTransactionBegin(m_sessionHandle, NULL);
-    auto cleanup = qScopeGuard([&] {
-        if (result != ERROR_SUCCESS) {
-            FwpmTransactionAbort0(m_sessionHandle);
-        }
-    });
-    if (result != ERROR_SUCCESS) {
-      logger.error() << "FwpmTransactionBegin0 failed. Return value:.\n"
-                     << result;
-      return false;
-    }
-
-    for (const auto& filterID : m_peerRules.values()) {
-      FwpmFilterDeleteById0(m_sessionHandle, filterID);
-    }
-
-    for (const auto& filterID : qAsConst(m_activeRules)) {
-      FwpmFilterDeleteById0(m_sessionHandle, filterID);
-    }
-
-           // Commit!
-    result = FwpmTransactionCommit0(m_sessionHandle);
-    if (result != ERROR_SUCCESS) {
-      logger.error() << "FwpmTransactionCommit0 failed. Return value:.\n"
-                     << result;
-      return false;
-    }
-    m_peerRules.clear();
-    m_activeRules.clear();
-    logger.debug() << "Firewall Disabled!";
-    return true;
+  auto result = FwpmTransactionBegin(m_sessionHandle, NULL);
+  if (result != ERROR_SUCCESS) return false;
+  auto cleanup = qScopeGuard([&] { FwpmTransactionAbort0(m_sessionHandle); });
+  for (const auto filterID : m_peerRules.values()) {
+    result = FwpmFilterDeleteById0(m_sessionHandle, filterID);
+    if (result != ERROR_SUCCESS && result != FWP_E_FILTER_NOT_FOUND) return false;
+  }
+  for (const auto filterID : qAsConst(m_activeRules)) {
+    result = FwpmFilterDeleteById0(m_sessionHandle, filterID);
+    if (result != ERROR_SUCCESS && result != FWP_E_FILTER_NOT_FOUND) return false;
+  }
+  if (FwpmTransactionCommit0(m_sessionHandle) != ERROR_SUCCESS) return false;
+  cleanup.dismiss();
+  m_peerRules.clear();
+  m_activeRules.clear();
+  return true;
 }
 
 bool WindowsFirewall::allowTrafficForAppOnAll(const QString& exePath,

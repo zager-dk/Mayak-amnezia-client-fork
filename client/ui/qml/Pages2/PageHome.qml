@@ -32,7 +32,7 @@ PageType {
             Layout.alignment: Qt.AlignHCenter
             Layout.preferredWidth: Math.min(220, root.width - 48)
             Layout.preferredHeight: Layout.preferredWidth
-            text: inProgress ? qsTr("Подключаем…") : connected ? qsTr("Выключить Маяк") : qsTr("Включить Маяк")
+            text: ConnectionController.cleanupPending ? qsTr("Повторить отключение") : inProgress ? qsTr("Подключаем…") : connected ? qsTr("Выключить Маяк") : qsTr("Включить Маяк")
         }
         BodyTextType {
             Layout.fillWidth: true

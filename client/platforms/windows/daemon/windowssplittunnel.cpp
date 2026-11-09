@@ -378,15 +378,16 @@ bool WindowsSplitTunnel::start(int inetAdapterIndex, int vpnAdapterIndex) {
   return true;
 }
 
-void WindowsSplitTunnel::stop() {
-  DWORD bytesReturned;
+bool WindowsSplitTunnel::stop() {
+  DWORD bytesReturned = 0;
   auto ok = DeviceIoControl(m_driver, IOCTL_CLEAR_CONFIGURATION, nullptr, 0,
                             nullptr, 0, &bytesReturned, nullptr);
   if (!ok) {
     logger.error() << "Stopping Split tunnel not successfull";
-    return;
+    return false;
   }
   logger.debug() << "Stopping Split tunnel successfull";
+  return true;
 }
 
 bool WindowsSplitTunnel::resetDriver(HANDLE driverIO) {

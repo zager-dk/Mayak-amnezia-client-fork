@@ -127,8 +127,14 @@ QString ConnectionUiController::connectionStateText() const
     return m_connectionStateText;
 }
 
+bool ConnectionUiController::cleanupPending() const
+{
+    return m_connectionController->managedCleanupPending();
+}
+
 void ConnectionUiController::toggleConnection()
 {
+    if (cleanupPending()) { closeConnection(); return; }
     if (m_state == Vpn::ConnectionState::Preparing) {
         if (m_connectionController->isMayakActive()) { closeConnection(); return; }
         emit preparingConfig();

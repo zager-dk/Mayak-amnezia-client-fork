@@ -1,6 +1,6 @@
 MayakVPN source package provenance
-Package version: 5.1.0.8
-Generated UTC: 2026-10-31T13:18:44.220717+00:00
+Package version: 5.1.0.9
+Generated UTC: 2026-10-31T20:32:01.896915+00:00
 Source repository HEAD: 2c5939c462e9b34832c90c3b28d6fa26d0136c33
 Source branch: mayak
 Scope: accepted tracked source snapshot, explicit product additions, and reviewed public Android build references.
@@ -66,11 +66,16 @@ Explicit product-source additions:
   client/platforms/android/android_controller.cpp
   client/platforms/android/android_controller.h
   client/platforms/windows/amneziavpn.rc.in
+  client/platforms/windows/daemon/windowsdaemon.cpp
   client/platforms/windows/daemon/windowsdaemon.h
   client/platforms/windows/daemon/windowsdaemontunnel.cpp
   client/platforms/windows/daemon/windowsfirewall.cpp
+  client/platforms/windows/daemon/windowsroutemonitor.cpp
+  client/platforms/windows/daemon/windowsroutemonitor.h
   client/platforms/windows/daemon/windowssplittunnel.cpp
+  client/platforms/windows/daemon/windowssplittunnel.h
   client/platforms/windows/daemon/windowstunnelservice.cpp
+  client/platforms/windows/daemon/windowstunnelservice.h
   client/platforms/windows/daemon/wireguardutilswindows.cpp
   client/platforms/windows/daemon/wireguardutilswindows.h
   client/platforms/windows/windowscommons.cpp
@@ -86,8 +91,18 @@ Explicit product-source additions:
   client/tests/api/testMayakPermissionPreflight.cpp
   client/tests/api/testMayakRuntime.cpp
   client/tests/api/testUpdateController.cpp
+  client/tests/windowsUapi/CMakeLists.txt
+  client/tests/windowsUapi/README.md
+  client/tests/windowsUapi/firewallSupport.cpp
+  client/tests/windowsUapi/nativeApiFakes.h
+  client/tests/windowsUapi/nativeSupport.cpp
+  client/tests/windowsUapi/stubs/killswitch.h
+  client/tests/windowsUapi/stubs/logger.h
+  client/tests/windowsUapi/testWindowsFirewallCleanup.cpp
+  client/tests/windowsUapi/testWindowsUapiTransaction.cpp
   client/translations/amneziavpn_ru_RU.ts
   client/ui/controllers/connectionUiController.cpp
+  client/ui/controllers/connectionUiController.h
   client/ui/controllers/mayakInviteUiController.cpp
   client/ui/controllers/mayakInviteUiController.h
   client/ui/controllers/updateUiController.cpp
@@ -197,11 +212,16 @@ Current dirty source paths (names only; payload hashes are in SOURCE_MANIFEST.sh
   client/platforms/android/android_controller.cpp
   client/platforms/android/android_controller.h
   client/platforms/windows/amneziavpn.rc.in
+  client/platforms/windows/daemon/windowsdaemon.cpp
   client/platforms/windows/daemon/windowsdaemon.h
   client/platforms/windows/daemon/windowsdaemontunnel.cpp
   client/platforms/windows/daemon/windowsfirewall.cpp
+  client/platforms/windows/daemon/windowsroutemonitor.cpp
+  client/platforms/windows/daemon/windowsroutemonitor.h
   client/platforms/windows/daemon/windowssplittunnel.cpp
+  client/platforms/windows/daemon/windowssplittunnel.h
   client/platforms/windows/daemon/windowstunnelservice.cpp
+  client/platforms/windows/daemon/windowstunnelservice.h
   client/platforms/windows/daemon/wireguardutilswindows.cpp
   client/platforms/windows/daemon/wireguardutilswindows.h
   client/platforms/windows/windowscommons.cpp
@@ -214,8 +234,10 @@ Current dirty source paths (names only; payload hashes are in SOURCE_MANIFEST.sh
   client/tests/api/testMayakPermissionPreflight.cpp
   client/tests/api/testMayakRuntime.cpp
   client/tests/api/testUpdateController.cpp
+  client/tests/windowsUapi/
   client/translations/amneziavpn_ru_RU.ts
   client/ui/controllers/connectionUiController.cpp
+  client/ui/controllers/connectionUiController.h
   client/ui/controllers/mayakInviteUiController.cpp
   client/ui/controllers/mayakInviteUiController.h
   client/ui/controllers/updateUiController.cpp

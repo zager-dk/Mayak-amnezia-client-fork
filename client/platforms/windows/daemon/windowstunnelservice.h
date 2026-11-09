@@ -21,7 +21,10 @@ class WindowsTunnelService final : public QObject {
   ~WindowsTunnelService();
 
   bool start(const QString& configData);
-  void stop();
+  bool stop();
+  bool interfaceExists();
+  static QString pipeName();
+  static bool setReplySucceeded(const QString& reply);
   bool isRunning();
   QString uapiCommand(const QString& command);
 

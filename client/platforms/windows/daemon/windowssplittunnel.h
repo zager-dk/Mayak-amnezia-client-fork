@@ -50,8 +50,9 @@ class WindowsSplitTunnel final {
 
   // Fetches and Pushed needed info to move to engaged mode
   bool start(int inetAdapterIndex, int vpnAdapterIndex = 0);
-  // Deletes Rules and puts the driver into passive mode
-  void stop();
+  // True only when the driver acknowledges clearing its configuration.
+  // A failed/unknown result must retain the caller's cleanup ownership.
+  bool stop();
 
   // Returns true if the split-tunnel driver is now up and running.
   bool isRunning();

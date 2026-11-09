@@ -24,6 +24,8 @@ public:
     bool manages(const QString& serverId) const;
     void begin(const QString& serverId);
     void cancel();
+    bool cleanupPending() const;
+    void retryCleanup();
     void shutdown();
     bool busy() const;
     QString message() const { return m_message; }

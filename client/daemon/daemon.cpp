@@ -12,6 +12,7 @@
 #include <QJsonValue>
 #include <QMetaEnum>
 #include <QTimer>
+#include <QScopeGuard>
 
 #include "leakdetector.h"
 #include "logger.h"
@@ -55,8 +56,39 @@ Daemon* Daemon::instance() {
 }
 
 bool Daemon::activateWithHealthContext(const InterfaceConfig& config, const QString& contextId) {
+#ifdef Q_OS_WINDOWS
+  const bool freshLegacyStart = contextId.isEmpty() && m_controlIdentity.isEmpty() &&
+      !m_teardownUncertain && m_connections.isEmpty() && !wgutils()->interfaceExists();
+  if (!contextId.isEmpty() || freshLegacyStart) {
+    // Reject B before invalidating A or invoking any platform hook/signal.
+    if (!m_controlIdentity.isEmpty() || m_teardownUncertain ||
+        !m_connections.isEmpty() || wgutils()->interfaceExists()) return false;
+    m_controlIdentity = contextId.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : contextId;
+    m_windowsCleanupConfig = config;
+    m_windowsManagedActivation = true;
+    m_teardownUncertain = true;
+    const bool activated = activate(config);
+    m_windowsManagedActivation = false;
+    if (!activated) {
+      cleanupWindowsManagedActivation();
+      return false;
+    }
+    m_healthContextId = contextId;
+    m_teardownUncertain = false;
+    m_healthHopType = config.m_hopType;
+    ++m_healthGeneration;
+    return true;
+  }
+#endif
   m_healthContextId.clear();
+#ifdef Q_OS_WINDOWS
+  const quint64 priorGeneration = m_healthGeneration;
+#endif
   if (!activate(config)) return false;
+#ifdef Q_OS_WINDOWS
+  // A legacy replacement can recurse through a fresh transactional activation.
+  if (m_healthGeneration != priorGeneration) return true;
+#endif
   m_healthContextId = contextId;
   m_controlIdentity = contextId.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : contextId;
   m_teardownUncertain = false;
@@ -81,7 +113,14 @@ bool Daemon::activate(const InterfaceConfig& config) {
   // If the activation abort's for any reason `the `activationFailure` signal is
   // emitted.
   logger.debug() << "Activating interface";
-  auto emit_failure_guard = qScopeGuard([this] { emit activationFailure(); });
+  auto emit_failure_guard = qScopeGuard([this] {
+#ifdef Q_OS_WINDOWS
+    // Legacy observers disable the firewall; managed rollback must first
+    // confirm native stop. The IPC caller still receives activation failure.
+    if (m_windowsManagedActivation) return;
+#endif
+    emit activationFailure();
+  });
 
   if (m_connections.contains(config.m_hopType)) {
     if (supportServerSwitching(config)) {
@@ -103,6 +142,9 @@ bool Daemon::activate(const InterfaceConfig& config) {
       logger.debug() << "Connection status:" << status;
       if (status) {
         m_connections[config.m_hopType] = ConnectionState(config);
+#ifdef Q_OS_WINDOWS
+        if (m_windowsCleanupConfig) m_windowsCleanupConfig = config;
+#endif
         m_handshakeTimer.start(HANDSHAKE_POLL_MSEC);
         emit_failure_guard.dismiss();
         return true;
@@ -116,7 +158,11 @@ bool Daemon::activate(const InterfaceConfig& config) {
     }
 
     Q_ASSERT(!m_connections.contains(config.m_hopType));
+#ifdef Q_OS_WINDOWS
+    if (activateWithHealthContext(config, QString())) {
+#else
     if (activate(config)) {
+#endif
       emit_failure_guard.dismiss();
       return true;
     }
@@ -125,9 +171,18 @@ bool Daemon::activate(const InterfaceConfig& config) {
 
   prepareActivation(config);
 
+  // Recheck before mutation: another process may have created the fixed-name
+  // service since managed admission. Never adopt that interface for this try.
+  const bool interfaceExists = wgutils()->interfaceExists();
+#ifdef Q_OS_WINDOWS
+  if (m_windowsManagedActivation && interfaceExists) return false;
+#endif
   // Bring up the wireguard interface if not already done.
-  if (!wgutils()->interfaceExists()) {
-    // Create the interface.
+  if (!interfaceExists) {
+    // Record the attempt before calling: addInterface can fail after creation.
+#ifdef Q_OS_WINDOWS
+    if (m_windowsManagedActivation) m_windowsInterfaceAttempted = true;
+#endif
     if (!wgutils()->addInterface(config)) {
       logger.error() << "Interface creation failed.";
       return false;
@@ -146,7 +201,11 @@ bool Daemon::activate(const InterfaceConfig& config) {
 
   // Configure routing for excluded addresses.
   for (const QString& i : config.m_excludedAddresses) {
+#ifdef Q_OS_WINDOWS
+    if (!addExclusionRoute(IPAddress(i))) return false;
+#else
     addExclusionRoute(IPAddress(i));
+#endif
   }
 
   // Add the peer to this interface.
@@ -155,6 +214,9 @@ bool Daemon::activate(const InterfaceConfig& config) {
     return false;
   }
 
+#ifdef Q_OS_WINDOWS
+  if (m_windowsManagedActivation) m_windowsDnsAttempted = true;
+#endif
   if (!maybeUpdateResolvers(config)) {
     return false;
   }
@@ -167,6 +229,9 @@ bool Daemon::activate(const InterfaceConfig& config) {
     }
   }
 
+#ifdef Q_OS_WINDOWS
+  if (m_windowsManagedActivation) m_windowsUpAttempted = true;
+#endif
   bool status = run(Up, config);
   logger.debug() << "Connection status:" << status;
   if (status) {
@@ -489,17 +554,66 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
 
 bool Daemon::managedDeactivate(const QString& identity) {
   // Ownership test precedes any native mutation, including context invalidation.
+#ifdef Q_OS_WINDOWS
+  if (!identity.isEmpty() && identity == m_windowsLastStoppedIdentity &&
+      m_controlIdentity.isEmpty() && !m_teardownUncertain &&
+      m_connections.isEmpty() && !wgutils()->interfaceExists()) return true;
+#endif
   if (identity.isEmpty() || identity != m_controlIdentity) return false;
   return deactivate(false);
 }
 QJsonObject Daemon::managedInspection() {
   QString state = QStringLiteral("unknown");
-  if (!m_controlIdentity.isEmpty()) state = QStringLiteral("active");
+  if (!m_controlIdentity.isEmpty()
+#ifdef Q_OS_WINDOWS
+      && !m_teardownUncertain
+#endif
+      ) state = QStringLiteral("active");
   else if (!m_teardownUncertain && m_connections.isEmpty() && !wgutils()->interfaceExists()) state = QStringLiteral("off");
   return QJsonObject{{"state", state}, {"controlIdentity", m_controlIdentity}};
 }
 
+#ifdef Q_OS_WINDOWS
+bool Daemon::cleanupWindowsManagedActivation() {
+  Q_ASSERT(m_windowsCleanupConfig);
+  m_healthContextId.clear();
+  m_handshakeTimer.stop();
+  m_teardownUncertain = true;
+  bool success = true;
+  if (m_windowsUpAttempted) {
+    if (run(Down, *m_windowsCleanupConfig)) m_windowsUpAttempted = false;
+    else success = false;
+  }
+  // Removing the owned Windows interface also removes its peers/IPs/routes.
+  // WireguardUtils retains monitor/firewall inputs until their cleanup succeeds.
+  if (m_windowsInterfaceAttempted) {
+    if (wgutils()->deleteInterface()) m_windowsInterfaceAttempted = false;
+    else success = false;
+  }
+  if (m_windowsDnsAttempted) {
+    if (dnsutils()->restoreResolvers()) m_windowsDnsAttempted = false;
+    else success = false;
+  }
+  if (success) {
+    m_windowsLastStoppedIdentity = m_controlIdentity;
+    m_controlIdentity.clear();
+    m_connections.clear();
+    m_excludedAddrSet.clear();
+    m_windowsCleanupConfig.reset();
+    m_teardownUncertain = false;
+  }
+  return success;
+}
+#endif
+
 bool Daemon::deactivate(bool emitSignals) {
+#ifdef Q_OS_WINDOWS
+  if (m_windowsCleanupConfig) {
+    const bool success = cleanupWindowsManagedActivation();
+    if (emitSignals && success) emit disconnected();
+    return success;
+  }
+#endif
   m_healthContextId.clear();
   m_teardownUncertain = true;
   bool success = true;
@@ -617,7 +731,11 @@ QJsonObject Daemon::getStatus() {
   json.insert("healthContextId", m_healthContextId);
   json.insert("generation", QString::number(m_healthGeneration));
 
-  if (!wgutils()->interfaceExists() || m_connections.isEmpty()) {
+  if (
+#ifdef Q_OS_WINDOWS
+      m_teardownUncertain ||
+#endif
+      !wgutils()->interfaceExists() || m_connections.isEmpty()) {
     json.insert("connected", QJsonValue(false));
     json.insert("healthValid", QJsonValue(false));
     return json;

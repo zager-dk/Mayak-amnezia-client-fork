@@ -7,6 +7,9 @@
 
 #include <QDateTime>
 #include <QTimer>
+#ifdef Q_OS_WINDOWS
+#include <optional>
+#endif
 
 #include "daemon/daemonerrors.h"
 #include "daemonerrors.h"
@@ -62,6 +65,9 @@ class Daemon : public QObject {
 
  private:
   bool maybeUpdateResolvers(const InterfaceConfig& config);
+#ifdef Q_OS_WINDOWS
+  bool cleanupWindowsManagedActivation();
+#endif
   bool addExclusionRoute(const IPAddress& address);
   bool delExclusionRoute(const IPAddress& address);
 
@@ -93,6 +99,14 @@ class Daemon : public QObject {
   QMap<InterfaceConfig::HopType, ConnectionState> m_connections;
   QHash<IPAddress, int> m_excludedAddrSet;
   QTimer m_handshakeTimer;
+#ifdef Q_OS_WINDOWS
+  bool m_windowsManagedActivation = false;
+  std::optional<InterfaceConfig> m_windowsCleanupConfig;
+  bool m_windowsInterfaceAttempted = false;
+  bool m_windowsDnsAttempted = false;
+  bool m_windowsUpAttempted = false;
+  QString m_windowsLastStoppedIdentity;
+#endif
   QString m_healthContextId;
   QString m_controlIdentity;
   bool m_teardownUncertain = false;

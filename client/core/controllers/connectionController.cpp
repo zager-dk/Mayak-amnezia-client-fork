@@ -62,6 +62,8 @@ void ConnectionController::setMayakRuntime(MayakAutoConnectRuntime* runtime)
 }
 bool ConnectionController::isMayakManaged(const QString& id) const { return m_mayak && m_mayak->manages(id); }
 QString ConnectionController::managedMessage() const { return m_managedActive && m_mayak ? m_mayak->message() : QString(); }
+bool ConnectionController::managedCleanupPending() const { return m_managedActive && m_mayak && m_mayak->cleanupPending(); }
+void ConnectionController::retryManagedCleanup() { if (managedCleanupPending()) m_mayak->retryCleanup(); }
 bool ConnectionController::canInstallUpdate() const {
     return m_effectiveState == Vpn::ConnectionState::Disconnected && (!m_mayak || !m_mayak->busy());
 }
@@ -249,6 +251,7 @@ ErrorCode ConnectionController::openConnection(const QString &serverId)
 
 void ConnectionController::closeConnection()
 {
+    if (managedCleanupPending()) { retryManagedCleanup(); return; }
     if (m_managedActive && m_mayak) { m_mayak->cancel(); return; }
     if (m_vpnConnection) {
         emit closeConnectionRequested();
