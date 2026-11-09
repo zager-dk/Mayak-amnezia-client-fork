@@ -38,12 +38,16 @@ Button {
     onArchivePhaseChanged: if (archivePhase !== "Connected") beamSettled = false
     // Scene size is independent of the action label and adapts to the home viewport.
     property real beaconDiameter: 204
+    // The home scene uses the actual wrapped action label when fitting a
+    // compact connected viewport, without estimating its font metrics.
+    readonly property real actionLabelHeight: label.implicitHeight
+    readonly property real actionLabelSpacing: 16
     readonly property bool motionActive: Qt.application.state === Qt.ApplicationActive
                                         && root.Window.window !== null
                                         && root.Window.window.visibility !== Window.Minimized
 
     implicitWidth: Math.max(204, beaconDiameter)
-    implicitHeight: beaconDiameter + 16 + label.implicitHeight
+    implicitHeight: beaconDiameter + actionLabelSpacing + actionLabelHeight
     padding: 0
     hoverEnabled: true
     text: ConnectionController.connectionStateText
@@ -85,7 +89,7 @@ Button {
         ButtonTextType {
             id: label
             objectName: "mayak-main-connect-label"
-            y: root.beaconDiameter + 16
+            y: root.beaconDiameter + root.actionLabelSpacing
             width: parent.width
             height: implicitHeight
             text: root.text

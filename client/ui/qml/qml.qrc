@@ -12,6 +12,10 @@
         <file>Components/ConnectButton.qml</file>
         <file>MayakCity/MayakCity.js</file>
         <file>MayakCity/MayakCityScene.qml</file>
+        <file>MayakCity/icons/sun.svg</file>
+        <file>MayakCity/icons/moon.svg</file>
+        <file>MayakCity/icons/sun-day.svg</file>
+        <file>MayakCity/icons/moon-day.svg</file>
         <file>MayakCity/oslo.jpg</file>
         <file>MayakCity/helsinki.jpg</file>
         <file>MayakCity/amsterdam.jpg</file>
