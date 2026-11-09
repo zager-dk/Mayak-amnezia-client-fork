@@ -5,6 +5,10 @@ import android.net.ConnectivityManager
 import android.net.LinkProperties
 import android.net.Network
 import android.net.NetworkCapabilities
+import android.os.ParcelFileDescriptor
+import android.system.ErrnoException
+import android.system.Os
+import android.system.OsConstants
 import java.net.InetAddress
 import java.net.Inet4Address
 import kotlinx.coroutines.CoroutineScope
@@ -35,6 +39,8 @@ import org.json.JSONObject
 
 private const val TAG = "Wireguard"
 private const val STATUS_POLL_TIMEOUT_MS = 1_000L
+// Mayak recovery: how long a replacement waits for the old backend to close before moving on.
+private const val RETIRE_WAIT_MS = 2_000L
 
 /** Own-peer UAPI snapshot. This reports tunnel telemetry, not internet reachability. */
 data class AwgTunnelHealth(
@@ -168,6 +174,8 @@ open class Wireguard : Protocol() {
     // Opaque Qt-owned proof context of the live backend; only Mayak managed recovery reuses it.
     @Volatile private var activeHealthContextId: String? = null
     private val healthPublication = AwgHealthPublicationGate()
+    // Dups of the live backend's UDP sockets (Mayak bounded recovery only uses them).
+    @Volatile private var activeSockets: List<BackendSocket> = emptyList()
     private val mutableTunnelHealth = MutableStateFlow<AwgTunnelHealth?>(null)
     val tunnelHealth = mutableTunnelHealth.asStateFlow()
 
@@ -296,7 +304,8 @@ open class Wireguard : Protocol() {
         vpnBuilder: Builder,
         protect: (Int) -> Boolean,
         stopExistingVpn: Boolean = false,
-        healthContextId: String
+        healthContextId: String,
+        boundedStop: Boolean = false
     ) {
         if (!stopExistingVpn && tunnelHandle != -1) {
             Log.w(TAG, "Tunnel already up")
@@ -314,7 +323,7 @@ open class Wireguard : Protocol() {
 
         vpnBuilder.establish().use { tunFd ->
             if (stopExistingVpn && tunnelHandle != -1) {
-                turnOffVpn()
+                if (boundedStop) turnOffVpnBounded() else turnOffVpn()
             }
             if (tunFd == null) {
                 throw VpnStartException("Create VPN interface: permission not granted or revoked")
@@ -328,11 +337,14 @@ open class Wireguard : Protocol() {
             throw VpnStartException("Wireguard tunnel creation error")
         }
 
-        if (!protect(GoBackend.awgGetSocketV4(tunnelHandle)) || !protect(GoBackend.awgGetSocketV6(tunnelHandle))) {
+        val socketV4 = GoBackend.awgGetSocketV4(tunnelHandle)
+        val socketV6 = GoBackend.awgGetSocketV6(tunnelHandle)
+        if (!protect(socketV4) || !protect(socketV6)) {
             GoBackend.awgTurnOff(tunnelHandle)
             tunnelHandle = -1
             throw VpnStartException("Protect VPN interface: permission not granted or revoked")
         }
+        activeSockets = listOfNotNull(dupBackendSocket(socketV4), dupBackendSocket(socketV6))
         val activation = AwgHealthActivation(tunnelHandle, backendGeneration, healthContextId,
             config.publicKeyHex, config.endpoint.toString())
         activeHealthContextId = healthContextId
@@ -425,6 +437,8 @@ open class Wireguard : Protocol() {
         val handleToClose = tunnelHandle
         GoBackend.awgTurnOff(handleToClose)
         tunnelHandle = -1
+        activeSockets.forEach { it.closeQuietly() }
+        activeSockets = emptyList()
     }
 
     fun managedIsBackendOff(): Boolean = tunnelHandle == -1
@@ -432,6 +446,63 @@ open class Wireguard : Protocol() {
         stopVpn()
         tunnelHandle == -1
     } catch (_: Exception) { false }
+
+    /**
+     * Mayak bounded close of the backend being replaced by a soft recovery. Closing an AWG
+     * device can block for a long time right after a network change (seen on device: 15 s and
+     * 12 min). By then establish() has already moved Android's routes to the new TUN, so an
+     * unbounded close left the phone without internet until the UI was opened. The close runs
+     * on its own thread; normally it finishes within the wait and the order stays as before.
+     * If it does not, the old backend's UDP sockets are shut for sending (it would otherwise
+     * keep handshaking with the same key and pull the server's endpoint away from the new
+     * backend) and the replacement continues. The stuck thread is left to finish on its own.
+     */
+    private fun turnOffVpnBounded() {
+        healthPublication.invalidate()
+        statusJob?.cancel()
+        statusJob = null
+        backendGeneration += 1
+        mutableTunnelHealth.value = null
+        val handleToClose = tunnelHandle
+        val socketsToClose = activeSockets
+        activeSockets = emptyList()
+        tunnelHandle = -1
+        if (handleToClose == -1) {
+            socketsToClose.forEach { it.closeQuietly() }
+            return
+        }
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val closer = Thread({
+            GoBackend.awgTurnOff(handleToClose)
+            socketsToClose.forEach { it.closeQuietly() }
+            val elapsed = android.os.SystemClock.elapsedRealtime() - startedAt
+            if (elapsed >= RETIRE_WAIT_MS) Log.i(TAG, "MayakNet event=retire_done elapsed_ms=$elapsed")
+        }, "awg-retire")
+        closer.isDaemon = true
+        closer.start()
+        // awgTurnOff drops the handle from the backend's table as its first step, so after the
+        // wait the next awgTurnOn never races that table update.
+        closer.join(RETIRE_WAIT_MS)
+        if (!closer.isAlive) return
+        val silenced = socketsToClose.count { it.shutdownSend() }
+        Log.w(TAG, "MayakNet event=retire_slow waited_ms=$RETIRE_WAIT_MS silenced=$silenced")
+    }
+
+    /** Own dup of a backend UDP socket: lets a stuck old backend be silenced without fd reuse. */
+    private class BackendSocket(private val dup: ParcelFileDescriptor) {
+        fun shutdownSend(): Boolean = try {
+            Os.shutdown(dup.fileDescriptor, OsConstants.SHUT_WR)
+            true
+        } catch (e: ErrnoException) {
+            // Unconnected UDP reports ENOTCONN but the kernel still marks the socket shut.
+            e.errno == OsConstants.ENOTCONN
+        } catch (_: Exception) { false }
+
+        fun closeQuietly() { runCatching { dup.close() } }
+    }
+
+    private fun dupBackendSocket(fd: Int): BackendSocket? =
+        if (fd < 0) null else runCatching { BackendSocket(ParcelFileDescriptor.fromFd(fd)) }.getOrNull()
 
     /**
      * Mayak managed recovery: replace the live AWG backend (new handle, new UDP socket and
@@ -444,7 +515,7 @@ open class Wireguard : Protocol() {
         val context = activeHealthContextId ?: return false
         if (context != expectedContextId || tunnelHandle == -1) return false
         val ok = try {
-            start(config, vpnBuilder, protect, true, healthContextId = context)
+            start(config, vpnBuilder, protect, true, healthContextId = context, boundedStop = true)
             tunnelHandle != -1
         } catch (e: Exception) {
             Log.e(TAG, "Managed recovery failed: ${e.javaClass.simpleName}")

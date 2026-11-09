@@ -1,5 +1,6 @@
 #include "mayakAttemptStore.h"
 
+#include <QDebug>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -227,7 +228,17 @@ LoadResult MayakAttemptStore::load() const
     if (state != SecureQSettings::StoredValueClass::Encrypted) return failed(Error::Corrupt);
     if (!m_settings->encryptedStorageAvailable()) return failed(Error::StorageUnavailable);
     const QVariant stored = m_settings->value(QString::fromLatin1(ledgerKey));
-    if (!stored.isValid() || stored.userType() != QMetaType::QByteArray) return failed(Error::Corrupt);
+    if (!stored.isValid()) {
+        // Encrypted under a key this installation no longer has (the OS credential store was
+        // reset or its entry replaced, and SecureQSettings then made a new key). These records
+        // can never be read again, so they authorize no cleanup and would block every connect
+        // forever. Drop them. The same key loss makes the session token unreadable, and the
+        // sign-in that follows re-issues the device key, which releases the device's server places.
+        if (!m_settings->removeAndSync(QString::fromLatin1(ledgerKey))) return failed(Error::StorageUnavailable);
+        qWarning() << "MayakAttemptStore: undecryptable attempt ledger discarded";
+        return {true, Error::None, {}};
+    }
+    if (stored.userType() != QMetaType::QByteArray) return failed(Error::Corrupt);
     const QByteArray bytes = stored.toByteArray();
     if (bytes.isEmpty() || bytes.size() > maxLedgerBytes) return failed(Error::Corrupt);
     QJsonParseError parseError;
