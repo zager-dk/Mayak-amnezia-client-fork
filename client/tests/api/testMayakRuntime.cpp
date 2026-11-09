@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <QApplication>
 #include <QJsonArray>
 #include <QElapsedTimer>
@@ -84,6 +85,7 @@ struct World : QObject {
     std::function<void(bool)> observeVisibility;
     std::function<void(B::Ticket)> observeFailover;
     bool silentFirst=false, singleCandidate=false;
+    int localFailStarts=0; // Windows: the next N starts never bring the tunnel interface up (no health)
     QString lastAcquireCandidate() const {
         QString id;
         for (const auto& p:requestPayloads) if (p.value("action").toString()=="acquire") id=p.value("candidate_id").toString();
@@ -125,6 +127,8 @@ struct World : QObject {
             ticket.gate->commit(); backendRunning=true;
             AwgHealthContext expected{guid(),QString(64,'a'),selectedHost+":49963"};
             done({ticket,deadFirst && starts==1?B::Outcome::Failed:B::Outcome::Started,expected});
+            // localFailStarts: started, but the tunnel interface never comes up (no health at all).
+            if (localFailStarts>0) { --localFailStarts; events<<"local_fail"; return; }
             // silentFirst: the first exit never answers a handshake (no valid health ever).
             const bool silent=silentFirst && selectedHost=="81.29.149.103";
             health={expected.id,1,expected.peerPublicKey,expected.endpoint,"10.8.0.2","MayakFixture",quint64(QDateTime::currentMSecsSinceEpoch()),10,10,!silent};
@@ -329,6 +333,10 @@ struct FastRecoveryTiming {
         t.stuckRxMs=200; t.stuckRxAfterNetworkMs=100; t.networkRecentMs=1500; t.recoverDeadlineMs=500;
         t.recoverBackoffMs={0,250,500};
         t.connectRetryMs={100,150,200};
+        // The fixture's "no valid health" models a silent exit (Android semantics) unless a
+        // test opts into the Windows meaning (local adapter never came up).
+        t.noHealthMeansLocalFailure=false;
+        t.localStartRetryMs={100,150};
         MayakAutoConnectRuntime::setRecoveryTimingForTests(t);
     }
     ~FastRecoveryTiming() { MayakAutoConnectRuntime::setRecoveryTimingForTests(previous); }
@@ -1381,6 +1389,91 @@ private slots:
         w.runtime->cancel();
         QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
         QCOMPARE(w.records(),0);
+    }
+
+    // ---- Windows: the local tunnel adapter does not come up (WinTun after an update) ----
+    static void useWindowsHealthMeaning() {
+        auto t=MayakAutoConnectRuntime::recoveryTiming(); t.noHealthMeansLocalFailure=true;
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(t);
+    }
+    void localAdapterFailureRetriesLaterWithoutBlamingExit() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning();
+        World w; w.localFailStarts=2; // both exits of the first cycle: no interface
+        QList<Vpn::ConnectionState> seen; QStringList texts;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState s,QString t){seen<<s;texts<<t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,40000);
+        QCOMPARE(w.events.count("local_fail"),2);
+        QVERIFY(!seen.contains(Vpn::ConnectionState::Error));
+        QVERIFY(std::any_of(texts.cbegin(),texts.cend(),[](const QString& t){
+            return t.startsWith(QStringLiteral("VPN-адаптер Windows не запустился — повторим через")); }));
+        // No exit was marked as failed: the retry cycle starts with the server's first choice.
+        QCOMPARE(w.lastAcquireCandidate(),w.first);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+    }
+    void localAdapterFailureGivesUpWithRebootAdvice() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning();
+        World w; w.localFailStarts=1000;
+        QString last;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState,QString t){last=t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,90000);
+        QCOMPARE(last,QStringLiteral("VPN-адаптер Windows не запускается. Перезагрузите компьютер и включите Маяк снова."));
+        QCOMPARE(w.starts,6); // 2 exits x (first cycle + 2 retries of localStartRetryMs)
+        QTest::qWait(500);
+        QCOMPARE(w.starts,6); // bounded: no further cycles
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+    }
+    void localAdapterFailureOnOneExitStillConnectsInSameCycle() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning();
+        World w; w.localFailStarts=1; // first exit: no interface; second exit connects normally
+        QStringList texts;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState,QString t){texts<<t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,25000);
+        QCOMPARE(w.starts,2);
+        QCOMPARE(w.lastAcquireCandidate(),w.second);
+        QVERIFY(std::none_of(texts.cbegin(),texts.cend(),[](const QString& t){ return t.startsWith(QStringLiteral("VPN-адаптер")); }));
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        // The exit was not blamed: the next connect starts with the server's first choice again.
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.lastAcquireCandidate(),w.first);
+        settle(w);
+    }
+    void windowsHealthMeaningIsThePlatformDefault() {
+        const MayakAutoConnectRuntime::RecoveryTiming defaults;
+#ifdef Q_OS_WINDOWS
+        QVERIFY(defaults.noHealthMeansLocalFailure);
+#else
+        QVERIFY(!defaults.noHealthMeansLocalFailure);
+#endif
+        QCOMPARE(defaults.localStartRetryMs,(QList<qint64>{30000,60000,120000,240000,300000}));
+    }
+    void localAdapterRetryIsCancelledByUser() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning();
+        auto t=MayakAutoConnectRuntime::recoveryTiming(); t.localStartRetryMs={60000};
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(t);
+        World w; w.localFailStarts=1000;
+        QString last;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState,QString t){last=t;});
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(last.startsWith(QStringLiteral("VPN-адаптер Windows не запустился — повторим через 60 с")),40000);
+        QCOMPARE(w.state,Vpn::ConnectionState::Preparing);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        const int starts=w.starts;
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTest::qWait(300);
+        QCOMPARE(w.starts,starts);
+        QVERIFY(!w.runtime->busy());
     }
 
     void connectNetworkFailureGivesUpAfterBoundedRetries() {

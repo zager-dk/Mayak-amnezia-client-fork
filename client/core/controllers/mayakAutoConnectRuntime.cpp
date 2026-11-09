@@ -104,6 +104,9 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     // Connect-time network failures are retried (RecoveryTiming::connectRetryMs) before an error.
     int connectRetries = 0;
     qint64 connectRetryAt = 0;
+    // The local tunnel adapter did not come up in this cycle (RecoveryTiming::noHealthMeansLocalFailure).
+    bool localStartFailed = false;
+    int localStartRetries = 0;
     // Connected-state truth for the UI (rule: never "Connected" without a passing
     // tunnel probe) and Android soft recovery of a stuck AWG transport.
     struct Recovery {
@@ -209,7 +212,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 const auto loaded=store->load();
                 if (loaded.ok && loaded.records.isEmpty()) {
                     connectRetryAt=0; terminal=false;
-                    logNet(QStringLiteral("event=connect_retry_start retry=%1").arg(connectRetries));
+                    logNet(QStringLiteral("event=connect_retry_start retry=%1 local_retry=%2").arg(connectRetries).arg(localStartRetries));
                     coordinator->begin();
                 } else if (now()>=connectRetryAt+10000) {
                     // An unreleased attempt blocks a fresh cycle: never spin in "retrying" forever.
@@ -567,6 +570,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 const bool networkLost=rec.networkLost;
                 rec={}; rec.networkLost=networkLost; rec.networkLostAt=networkLost ? now() : 0;
                 connectRetries=0; connectRetryAt=0; abandonUnconfirmed=false;
+                localStartFailed=false; localStartRetries=0;
                 connectedLocation=location;
                 output(Vpn::ConnectionState::Connected,QStringLiteral("Подключено"),location);
             } break;
@@ -582,6 +586,24 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 // no automatic retry: a new connect re-inspects and stops it first.
                 abandonUnconfirmed=false;
                 output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось завершить прежнее подключение. Нажмите «Включить Маяк» ещё раз."));
+            } else if (localStartFailed && !cancelled && !reconnectWanted &&
+                       (s.error==ac::ErrorCategory::Network || s.error==ac::ErrorCategory::Deadline ||
+                        s.error==ac::ErrorCategory::ProofFailed)) {
+                // The local tunnel adapter never came up (Windows refused to create it): no exit
+                // is at fault and an immediate retry fails the same way. Wait, then a fresh cycle.
+                localStartFailed=false;
+                if (localStartRetries<recoveryTimingStorage().localStartRetryMs.size()) {
+                    const qint64 delay=recoveryTimingStorage().localStartRetryMs.at(localStartRetries++);
+                    connectRetryAt=now()+delay; terminal=false;
+                    phase=QStringLiteral("preparing");
+                    output(Vpn::ConnectionState::Preparing,
+                           QStringLiteral("VPN-адаптер Windows не запустился — повторим через %1 с…").arg((delay+999)/1000));
+                    logNet(QStringLiteral("event=local_start_retry_scheduled retry=%1 delay_ms=%2").arg(localStartRetries).arg(delay));
+                } else {
+                    logNet(QStringLiteral("event=local_start_retry_exhausted"));
+                    output(Vpn::ConnectionState::Error,
+                           QStringLiteral("VPN-адаптер Windows не запускается. Перезагрузите компьютер и включите Маяк снова."));
+                }
             } else if ((s.error==ac::ErrorCategory::Network || s.error==ac::ErrorCategory::Deadline) && !cancelled &&
                        !reconnectWanted && connectRetries<recoveryTimingStorage().connectRetryMs.size()) {
                 // The gateway was unreachable (DNS/timeout, e.g. a mobile network waking up):
@@ -1012,8 +1034,13 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         // A started backend that never got a single handshake answered (not the user's cancel):
         // this exit is unreachable from here; the next connects try it last.
         // (a->cancelled is set by the coordinator's own retry stop; the user's cancel is `cancelled`.)
-        if (!a->adopted && !a->health.valid && !cancelled && now()-a->startMono>=5000)
-            avoidCandidate(a->identity.candidateId,"no_handshake");
+        if (!a->adopted && !a->health.valid && !cancelled && now()-a->startMono>=5000) {
+            if (recoveryTimingStorage().noHealthMeansLocalFailure) {
+                // Windows: no health = the tunnel interface never existed. Local, not the exit's fault.
+                localStartFailed=true;
+                logNet(QStringLiteral("event=local_start_failed waited_ms=%1").arg(now()-a->startMono));
+            } else avoidCandidate(a->identity.candidateId,"no_handshake");
+        }
         auto self=shared_from_this(); bridge->cancel(a->ticket);
         bridge->stopAndConfirm(a->ownTicket(),deadline,[self,a,c,n,done](B::Result r) {
             // Preserve exact observer evidence, but report this bounded call's

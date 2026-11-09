@@ -48,6 +48,16 @@ public:
         // Connect-time network failure (gateway unreachable, DNS, timeout): retry instead of
         // an immediate error; one delay per retry, then the error is shown.
         QList<qint64> connectRetryMs { 3000, 6000, 12000, 20000, 30000 };
+        // Windows daemon: tunnel health is reported as soon as the tunnel interface exists,
+        // with or without a handshake. A started attempt with no health at all therefore means
+        // the local adapter never came up (e.g. WinTun creation failed right after an update),
+        // not a silent exit. Such failures are retried with these delays, then reported.
+#ifdef Q_OS_WINDOWS
+        bool noHealthMeansLocalFailure = true;
+#else
+        bool noHealthMeansLocalFailure = false;
+#endif
+        QList<qint64> localStartRetryMs { 30000, 60000, 120000, 240000, 300000 };
     };
     static RecoveryTiming recoveryTiming();
     static void setRecoveryTimingForTests(const RecoveryTiming& timing);

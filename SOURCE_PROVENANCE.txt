@@ -1,9 +1,10 @@
-MayakVPN 5.1.0.18 source provenance
-Base archive (published 5.1.0.17) SHA-256: 192b81adfc3816e45c1097a2e0d7874ea09a0104ec86c6a2fe09ce7aa95891e6
-Delta report SHA-256: 205311b88a638b5d9160464696fc90e6ea081757479105b70a180f41bf61dfb2
+MayakVPN 5.1.0.19 source provenance
+Base archive (published 5.1.0.18) SHA-256: 7d771dfbe6e192682e67ab533644480b64ea28cae61275131780e7370d6587d4
+Delta report SHA-256: 20c3d31c152ce41893b9ef9e57a0917869d0af04b62a239e7f26a7ea99a0748f
 Overlaid files (kind, path, SHA-256):
-  changed client/android/wireguard/src/main/kotlin/org/amnezia/vpn/protocol/wireguard/Wireguard.kt d5cb6e7c6e2780c262d3c5bd336992b87d98d307fbb316d52eecffca78c02f85
-  changed client/core/controllers/mayakAttemptStore.cpp 0ced855fc22cd75a5ad2d2efb148d3f6cb245fd06706a9973f59b116867dc503
+  changed client/core/controllers/mayakAutoConnectRuntime.cpp 2d0874f117bc89fc7ac0495b0b07a69336fc8728b0bf621fb9d1c9d2e9227406
+  changed client/core/controllers/mayakAutoConnectRuntime.h 591b926d026d85e0f4cecbc69360d53347e8d2517d0fcddd85ccea7de4fd3f13
+  changed client/tests/api/testMayakRuntime.cpp d7440d796d01adfddd5af9704cc9956d78d82376fd77dc1d4788059c9fc83c56
 Not included (build artefacts/binaries):
   client/3rd/SortFilterProxyModel/.git
   client/3rd/qtgamepad/.git
