@@ -75,11 +75,41 @@ private const val CHECK_VPN_PERMISSION_ACTION_CODE = 1
 private const val CREATE_FILE_ACTION_CODE = 2
 private const val OPEN_FILE_ACTION_CODE = 3
 private const val CHECK_NOTIFICATION_PERMISSION_ACTION_CODE = 4
+private const val MAYAK_PERMISSION_PREFLIGHT_READY = 0
+private const val MAYAK_PERMISSION_PREFLIGHT_DENIED = 1
+private const val MAYAK_PERMISSION_PREFLIGHT_UNAVAILABLE = 2
 
 private const val PREFS_NOTIFICATION_PERMISSION_ASKED = "NOTIFICATION_PERMISSION_ASKED"
 private const val OPEN_FILE_AFTER_RESUME_DELAY_MS = 400L
 private const val KEY_PENDING_OPEN_FILE_URI = "pending_open_file_uri"
 private const val FILE_PROVIDER_AUTHORITY_SUFFIX = ".qtprovider"
+
+internal class ManagedActivationGate {
+    private var current: String? = null
+    private val revoked = hashSetOf<String>()
+    @Synchronized fun begin(ticket: String): Boolean {
+        if (ticket.isBlank() || ticket in revoked || revoked.size >= 1024) return false
+        if (current != null && current != ticket) return false
+        current = ticket
+        return true
+    }
+    @Synchronized fun accepts(ticket: String) = current == ticket && ticket !in revoked
+    @Synchronized fun cancel(ticket: String) {
+        revoked.add(ticket)
+        if (current == ticket) current = null
+    }
+    @Synchronized fun invalidateAll() { current?.let { cancel(it) } }
+    // Commit and cancellation serialize before a job invokes the native wrapper.
+    @Synchronized fun commit(ticket: String) = accepts(ticket)
+}
+
+private data class ManagedPermissionPreflight(
+    val requestId: String,
+    var cancelled: Boolean = false,
+    var vpnResultOutstanding: Boolean = false,
+    var notificationResultOutstanding: Boolean = false,
+    var notificationDialog: AlertDialog? = null
+)
 
 class AmneziaActivity : QtActivity() {
 
@@ -94,10 +124,19 @@ class AmneziaActivity : QtActivity() {
     private var pfd: ParcelFileDescriptor? = null
     private lateinit var billingRepository: BillingRepository
 
+    private val managedStarts = ManagedActivationGate()
+    private val managedControlBindingLifetime = ManagedControlBindingLifetime()
+    private val pendingManagedMessages = mutableListOf<Message>()
+    private var pendingManagedConfig: Pair<String, String>? = null
+
     private val actionResultHandlers = mutableMapOf<Int, ActivityResultHandler>()
     private val permissionRequestHandlers = mutableMapOf<Int, PermissionRequestHandler>()
+    private var activeManagedPermissionPreflight: ManagedPermissionPreflight? = null
+    private val managedPermissionPreflightSerial = ManagedPermissionPreflightSerial()
+    private val requestedManagedPermissionPreflights = ManagedPermissionRequestTokens()
 
     private var isActivityResumed = false
+    private var isActivityStarted = false
     private var hasWindowFocus = false
     private val resumeHandler = Handler(Looper.getMainLooper())
     private var pendingOpenFileUri: String? = null
@@ -107,18 +146,31 @@ class AmneziaActivity : QtActivity() {
     private val vpnServiceEventHandler: Handler by lazy(NONE) {
         object : Handler(Looper.getMainLooper()) {
             override fun handleMessage(msg: Message) {
+                if (!managedControlBindingLifetime.acceptsCallbacks()) return
                 val event = msg.extractIpcMessage<ServiceEvent>()
                 Log.d(TAG, "Handle event: $event")
                 when (event) {
                     ServiceEvent.STATUS_CHANGED -> {
                         msg.data?.getStatus()?.let { (state) ->
                             Log.d(TAG, "Handle protocol state: $state")
-                            QtAndroidController.onVpnStateChanged(state.ordinal)
+                            val disconnected = state.toString().equals("DISCONNECTED", ignoreCase = true)
+                            val statusTicket = msg.data?.getString(MSG_MANAGED_TICKET)
+                            val statusContext = msg.data?.getString(MSG_HEALTH_CONTEXT_ID)
+                            if (managedControlBindingLifetime.acceptStatus(statusTicket, statusContext, disconnected)) {
+                                if (!isActivityStarted && !managedControlBindingLifetime.shouldRetainBinding()) {
+                                    doUnbindService()
+                                }
+                                QtAndroidController.onVpnStateChanged(state.ordinal)
+                            }
                         }
                     }
 
                     ServiceEvent.STATUS -> {
-                        if (isWaitingStatus) {
+                        pendingManagedConfig?.let { (ticket, config) ->
+                    pendingManagedConfig = null
+                    if (managedStarts.accepts(ticket)) connectToVpn(config)
+                }
+                if (isWaitingStatus) {
                             isWaitingStatus = false
                             msg.data?.getStatus()?.let { QtAndroidController.onStatus(it) }
                         }
@@ -130,12 +182,30 @@ class AmneziaActivity : QtActivity() {
                         }
                     }
 
+                    ServiceEvent.AWG_HEALTH_UPDATE -> {
+                        msg.data?.getString(MSG_AWG_TUNNEL_HEALTH)?.let {
+                            QtAndroidController.onAwgTunnelHealth(it)
+                        }
+                    }
+
+                    ServiceEvent.MANAGED_RESULT -> {
+                        msg.data?.getString(MSG_MANAGED_RESULT)?.let { result ->
+                            consumeManagedControlResult(result)
+                            QtAndroidController.onManagedLifecycle(result)
+                        }
+                    }
+
                     ServiceEvent.ERROR -> {
+                        if (!managedControlBindingLifetime.acceptStatus(
+                                msg.data?.getString(MSG_MANAGED_TICKET),
+                                msg.data?.getString(MSG_HEALTH_CONTEXT_ID), disconnected = true)) return
                         msg.data?.getString(MSG_ERROR)?.let { error ->
                             Log.e(TAG, "From VpnService: $error")
                         }
                         // todo: add error reporting to Qt
+                        managedControlBindingLifetime.serviceLost()
                         QtAndroidController.onServiceError()
+                        if (!isActivityStarted) doUnbindService()
                     }
                 }
             }
@@ -149,6 +219,7 @@ class AmneziaActivity : QtActivity() {
     private val serviceConnection: ServiceConnection by lazy(NONE) {
         object : ServiceConnection {
             override fun onServiceConnected(name: ComponentName?, service: IBinder?) {
+                if (!managedControlBindingLifetime.acceptsCallbacks()) return
                 Log.d(TAG, "Service ${name?.flattenToString()} was connected")
                 // get a messenger from the service to send actions to the service
                 vpnServiceMessenger.set(Messenger(service))
@@ -160,25 +231,44 @@ class AmneziaActivity : QtActivity() {
                     replyTo = activityMessenger
                 )
                 isServiceConnected = true
+                pendingManagedMessages.toList().also { pendingManagedMessages.clear() }.forEach {
+                    vpnServiceMessenger.send(it, activityMessenger)
+                }
+                pendingManagedConfig?.let { (ticket, config) ->
+                    pendingManagedConfig = null
+                    if (managedStarts.accepts(ticket)) connectToVpn(config)
+                }
                 if (isWaitingStatus) {
                     vpnServiceMessenger.send(Action.REQUEST_STATUS, replyTo = activityMessenger)
                 }
             }
 
             override fun onServiceDisconnected(name: ComponentName?) {
+                if (!managedControlBindingLifetime.acceptsCallbacks()) return
                 Log.w(TAG, "Service ${name?.flattenToString()} was unexpectedly disconnected")
+                managedControlBindingLifetime.serviceLost()
                 isServiceConnected = false
                 vpnServiceMessenger.reset()
                 isWaitingStatus = true
                 QtAndroidController.onServiceDisconnected()
-                doBindService()
+                if (!isActivityStarted) doUnbindService() else doBindService()
             }
 
             override fun onBindingDied(name: ComponentName?) {
+                if (!managedControlBindingLifetime.acceptsCallbacks()) return
                 Log.w(TAG, "Binding to the ${name?.flattenToString()} unexpectedly died")
                 doUnbindService()
+                managedControlBindingLifetime.serviceLost()
                 QtAndroidController.onServiceDisconnected()
                 doBindService()
+            }
+
+            override fun onNullBinding(name: ComponentName?) {
+                if (!managedControlBindingLifetime.acceptsCallbacks()) return
+                Log.w(TAG, "Service ${name?.flattenToString()} returned a null binding")
+                doUnbindService()
+                managedControlBindingLifetime.serviceLost()
+                QtAndroidController.onServiceDisconnected()
             }
         }
     }
@@ -200,9 +290,12 @@ class AmneziaActivity : QtActivity() {
         vpnServiceMessenger = IpcMessenger(
             "VpnService",
             onDeadObjectException = {
-                doUnbindService()
-                QtAndroidController.onServiceDisconnected()
-                doBindService()
+                if (managedControlBindingLifetime.acceptsCallbacks()) {
+                    doUnbindService()
+                    managedControlBindingLifetime.serviceLost()
+                    QtAndroidController.onServiceDisconnected()
+                    doBindService()
+                }
             }
         )
         pendingOpenFileUri = savedInstanceState?.getString(KEY_PENDING_OPEN_FILE_URI)
@@ -268,28 +361,40 @@ class AmneziaActivity : QtActivity() {
 
     override fun onStart() {
         super.onStart()
+        val wasStarted = isActivityStarted
+        isActivityStarted = true
         Log.d(TAG, "Start Amnezia activity")
         mainScope.launch {
             qtInitialized.await()
             vpnProto?.let { proto ->
-                if (AmneziaVpnService.isRunning(applicationContext, proto.processName)) {
-                    doBindService()
+                val running = AmneziaVpnService.isRunning(applicationContext, proto.processName)
+                if (managedControlBindingLifetime.shouldBindOnStart(isInBoundState, running)) {
+                    doBindService(createIfMissing = managedControlBindingLifetime.shouldRetainBinding())
+                } else if (!wasStarted && isServiceConnected && managedControlBindingLifetime.shouldRetainBinding()) {
+                    vpnServiceMessenger.send(Action.REQUEST_STATUS, replyTo = activityMessenger)
                 }
             }
         }
     }
 
     override fun onStop() {
+        isActivityStarted = false
         isActivityResumed = false
         hasWindowFocus = false
-        // Cancel all pending operations when activity stops
+        // UI backgrounding is not a VPN service death. Keep the current managed control
+        // registration so health and an explicit stop remain deliverable while backgrounded.
         resumeHandler.removeCallbacksAndMessages(null)
         openFileDeliveryScheduled = false
         Log.d(TAG, "Stop Amnezia activity")
-        doUnbindService()
-        mainScope.launch {
-            qtInitialized.await()
-            QtAndroidController.onServiceDisconnected()
+        if (managedControlBindingLifetime.shouldUnbindForUiStop()) {
+            doUnbindService()
+            mainScope.launch {
+                qtInitialized.await()
+                QtAndroidController.onServiceDisconnected()
+            }
+        } else if (!isInBoundState && vpnProto != null) {
+            // A live managed session or stop request still needs a control channel in background.
+            doBindService(createIfMissing = true)
         }
         super.onStop()
     }
@@ -481,11 +586,33 @@ class AmneziaActivity : QtActivity() {
     }
 
     override fun onDestroy() {
+        managedControlBindingLifetime.destroy()
+        isActivityStarted = false
         isActivityResumed = false
         hasWindowFocus = false
         // Cancel all pending operations when activity is destroyed
         resumeHandler.removeCallbacksAndMessages(null)
+        val abandonedPreflights = (managedPermissionPreflightSerial.abandonAll() +
+                requestedManagedPermissionPreflights.abandonAll()).distinct()
+        val activePreflight = activeManagedPermissionPreflight
+        activeManagedPermissionPreflight = null
+        activePreflight?.notificationDialog?.let { dialog ->
+            dialog.setOnCancelListener(null)
+            if (dialog.isShowing) dialog.dismiss()
+        }
+        for (requestId in abandonedPreflights) {
+            QtAndroidController.onManagedPermissionPreflightResult(
+                requestId, MAYAK_PERMISSION_PREFLIGHT_UNAVAILABLE)
+        }
+        actionResultHandlers.remove(CHECK_VPN_PERMISSION_ACTION_CODE)
+        actionResultHandlers.remove(CHECK_NOTIFICATION_PERMISSION_ACTION_CODE)
+        permissionRequestHandlers.remove(CHECK_NOTIFICATION_PERMISSION_ACTION_CODE)
         Log.d(TAG, "Destroy Amnezia activity")
+        vpnServiceEventHandler.removeCallbacksAndMessages(null)
+        pendingManagedMessages.clear()
+        pendingManagedConfig = null
+        doUnbindService()
+        if (qtInitialized.isCompleted) QtAndroidController.onServiceDisconnected()
         unregisterBroadcastReceiver(notificationStateReceiver)
         notificationStateReceiver = null
         mainScope.cancel()
@@ -495,13 +622,12 @@ class AmneziaActivity : QtActivity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         Log.d(TAG, "Process activity result, code: ${actionCodeToString(requestCode)}, " +
                 "resultCode: $resultCode, data: $data")
-        actionResultHandlers[requestCode]?.let { handler ->
+        actionResultHandlers.remove(requestCode)?.let { handler ->
             when (resultCode) {
                 RESULT_OK -> handler.onSuccess(data)
                 else -> handler.onFail(data)
             }
             handler.onAny(data)
-            actionResultHandlers.remove(requestCode)
         } ?: super.onActivityResult(requestCode, resultCode, data)
     }
 
@@ -513,13 +639,31 @@ class AmneziaActivity : QtActivity() {
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         Log.d(TAG, "Process permission result, code: ${actionCodeToString(requestCode)}, " +
                 "permissions: ${permissions.contentToString()}, results: ${grantResults.contentToString()}")
-        permissionRequestHandlers[requestCode]?.let { handler ->
+        val managedPreflight = activeManagedPermissionPreflight
+        if (requestCode == CHECK_NOTIFICATION_PERMISSION_ACTION_CODE && managedPreflight?.notificationResultOutstanding == true) {
+            val disposition = managedPermissionPreflightSerial.consumeSystemResult(managedPreflight.requestId)
+            managedPreflight.notificationResultOutstanding = false
+            permissionRequestHandlers.remove(requestCode)
+            if (disposition.disposition == ManagedPermissionPreflightSerial.ResultDisposition.Cancelled) {
+                activeManagedPermissionPreflight = null
+                disposition.nextRequestId?.let(::startManagedPermissionPreflight)
+                return
+            }
+            if (disposition.disposition == ManagedPermissionPreflightSerial.ResultDisposition.Stale) return
+            // Notification consent is optional; still fail closed if VPN consent was revoked meanwhile.
+            finishManagedPermissionPreflight(
+                managedPreflight.requestId,
+                if (VpnService.prepare(applicationContext) == null) MAYAK_PERMISSION_PREFLIGHT_READY
+                else MAYAK_PERMISSION_PREFLIGHT_DENIED
+            )
+            return
+        }
+        permissionRequestHandlers.remove(requestCode)?.let { handler ->
             if (grantResults.isNotEmpty()) {
                 if (grantResults[0] == PackageManager.PERMISSION_GRANTED) handler.onSuccess()
                 else handler.onFail()
             }
             handler.onAny()
-            permissionRequestHandlers.remove(requestCode)
         } ?: super.onRequestPermissionsResult(requestCode, permissions, grantResults)
     }
 
@@ -532,13 +676,13 @@ class AmneziaActivity : QtActivity() {
      * Methods for service binding
      */
     @MainThread
-    private fun doBindService() {
+    private fun doBindService(createIfMissing: Boolean = false) {
+        if (isInBoundState || isFinishing || isDestroyed) return
         Log.d(TAG, "Bind service")
         vpnProto?.let { proto ->
-            Intent(this, proto.serviceClass).also {
-                bindService(it, serviceConnection, BIND_ABOVE_CLIENT and BIND_AUTO_CREATE)
-            }
-            isInBoundState = true
+            val flags = if (createIfMissing) BIND_ABOVE_CLIENT or BIND_AUTO_CREATE else 0
+            // Record only a successful bind. A missing stopped service is not a binding.
+            isInBoundState = bindService(Intent(this, proto.serviceClass), serviceConnection, flags)
         }
     }
 
@@ -559,7 +703,7 @@ class AmneziaActivity : QtActivity() {
      * Methods of starting and stopping VpnService
      */
     @MainThread
-    private fun checkVpnPermission(onPermissionGranted: () -> Unit) {
+    private fun checkVpnPermission(onDenied: () -> Unit = {}, onPermissionGranted: () -> Unit) {
         Log.d(TAG, "Check VPN permission")
         VpnService.prepare(applicationContext)?.let { intent ->
             startActivityForResult(intent, CHECK_VPN_PERMISSION_ACTION_CODE, ActivityResultHandler(
@@ -569,6 +713,7 @@ class AmneziaActivity : QtActivity() {
                     onPermissionGranted()
                 },
                 onFail = {
+                    onDenied()
                     Log.w(TAG, "Vpn permission denied")
                     showOnVpnPermissionRejectDialog()
                     mainScope.launch {
@@ -589,6 +734,175 @@ class AmneziaActivity : QtActivity() {
                 startActivity(Intent(Settings.ACTION_VPN_SETTINGS))
             }
             .show()
+    }
+
+    @Suppress("unused")
+    fun prepareManagedPermissionPreflight(requestId: String) {
+        if (requestId.isBlank()) {
+            QtAndroidController.onManagedPermissionPreflightResult(requestId, MAYAK_PERMISSION_PREFLIGHT_UNAVAILABLE)
+            return
+        }
+        if (!requestedManagedPermissionPreflights.reserve(requestId)) return
+        runOnUiThread {
+            if (!requestedManagedPermissionPreflights.isCurrent(requestId)) return@runOnUiThread
+            if (isFinishing || isDestroyed) {
+                requestedManagedPermissionPreflights.complete(requestId)
+                QtAndroidController.onManagedPermissionPreflightResult(requestId, MAYAK_PERMISSION_PREFLIGHT_UNAVAILABLE)
+                return@runOnUiThread
+            }
+            if (managedPermissionPreflightSerial.enqueue(requestId)) startManagedPermissionPreflight(requestId)
+        }
+    }
+
+    @Suppress("unused")
+    fun cancelManagedPermissionPreflight(requestId: String) {
+        // Native cancellation removes its callback first; this token invalidates
+        // a queued UI runnable before it can create a dialog or OS permission request.
+        requestedManagedPermissionPreflights.cancel(requestId)
+        val next = managedPermissionPreflightSerial.cancel(requestId)
+        runOnUiThread { cancelManagedPermissionPreflightOnUiThread(requestId, next) }
+    }
+
+    @MainThread
+    private fun cancelManagedPermissionPreflightOnUiThread(requestId: String, nextRequestId: String?) {
+        val active = activeManagedPermissionPreflight
+        val outstanding = active?.requestId == requestId &&
+                (active.vpnResultOutstanding || active.notificationResultOutstanding)
+        if (active?.requestId != requestId) {
+            // Cancellation can reach the UI queue after serial ownership was
+            // released but before its flow object was installed. Do not strand
+            // the next request selected synchronously by the serial gate.
+            nextRequestId?.let(::startManagedPermissionPreflight)
+            return
+        }
+        active.cancelled = true
+        active.notificationDialog?.let { dialog ->
+            dialog.setOnCancelListener(null)
+            if (dialog.isShowing) dialog.dismiss()
+        }
+        active.notificationDialog = null
+        if (!outstanding) {
+            activeManagedPermissionPreflight = null
+            nextRequestId?.let(::startManagedPermissionPreflight)
+        }
+    }
+
+    @MainThread
+    private fun startManagedPermissionPreflight(requestId: String) {
+        if (activeManagedPermissionPreflight?.requestId == requestId) return
+        if (!requestedManagedPermissionPreflights.isCurrent(requestId)) {
+            val next = managedPermissionPreflightSerial.cancel(requestId)
+            next?.let(::startManagedPermissionPreflight)
+            return
+        }
+        if (isFinishing || isDestroyed) {
+            requestedManagedPermissionPreflights.complete(requestId)
+            val next = managedPermissionPreflightSerial.finish(requestId)
+            QtAndroidController.onManagedPermissionPreflightResult(requestId, MAYAK_PERMISSION_PREFLIGHT_UNAVAILABLE)
+            next?.let(::startManagedPermissionPreflight)
+            return
+        }
+        if (!managedPermissionPreflightSerial.owns(requestId)) return
+        actionResultHandlers.remove(CHECK_VPN_PERMISSION_ACTION_CODE)
+        permissionRequestHandlers.remove(CHECK_VPN_PERMISSION_ACTION_CODE)
+        actionResultHandlers.remove(CHECK_NOTIFICATION_PERMISSION_ACTION_CODE)
+        permissionRequestHandlers.remove(CHECK_NOTIFICATION_PERMISSION_ACTION_CODE)
+        val flow = ManagedPermissionPreflight(requestId)
+        activeManagedPermissionPreflight = flow
+        val intent = VpnService.prepare(applicationContext)
+        if (intent == null) {
+            continueManagedPermissionPreflightAfterVpn(requestId)
+            return
+        }
+        if (!managedPermissionPreflightSerial.markSystemResultOutstanding(requestId)) {
+            finishManagedPermissionPreflight(requestId, MAYAK_PERMISSION_PREFLIGHT_UNAVAILABLE)
+            return
+        }
+        flow.vpnResultOutstanding = true
+        startActivityForResult(intent, CHECK_VPN_PERMISSION_ACTION_CODE, ActivityResultHandler(
+            onSuccess = { onManagedVpnPermissionResult(requestId, granted = true) },
+            onFail = { onManagedVpnPermissionResult(requestId, granted = false) }
+        ))
+    }
+
+    @MainThread
+    private fun onManagedVpnPermissionResult(requestId: String, granted: Boolean) {
+        val disposition = managedPermissionPreflightSerial.consumeSystemResult(requestId)
+        if (disposition.disposition == ManagedPermissionPreflightSerial.ResultDisposition.Stale) return
+        if (disposition.disposition == ManagedPermissionPreflightSerial.ResultDisposition.Cancelled) {
+            if (activeManagedPermissionPreflight?.requestId == requestId) activeManagedPermissionPreflight = null
+            disposition.nextRequestId?.let(::startManagedPermissionPreflight)
+            return
+        }
+        val flow = activeManagedPermissionPreflight ?: return
+        if (flow.requestId != requestId || !flow.vpnResultOutstanding) return
+        flow.vpnResultOutstanding = false
+        if (flow.cancelled) {
+            activeManagedPermissionPreflight = null
+            return
+        }
+        if (!granted || VpnService.prepare(applicationContext) != null) {
+            finishManagedPermissionPreflight(requestId, MAYAK_PERMISSION_PREFLIGHT_DENIED)
+            return
+        }
+        continueManagedPermissionPreflightAfterVpn(requestId)
+    }
+
+    @MainThread
+    private fun continueManagedPermissionPreflightAfterVpn(requestId: String) {
+        val flow = activeManagedPermissionPreflight ?: return
+        if (flow.requestId != requestId || flow.cancelled) return
+        if (VpnService.prepare(applicationContext) != null) {
+            finishManagedPermissionPreflight(requestId, MAYAK_PERMISSION_PREFLIGHT_DENIED)
+            return
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU || isNotificationPermissionGranted() ||
+            Prefs.load<Boolean>(PREFS_NOTIFICATION_PERMISSION_ASKED)) {
+            finishManagedPermissionPreflight(requestId, MAYAK_PERMISSION_PREFLIGHT_READY)
+            return
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.notificationDialogTitle)
+            .setMessage(R.string.notificationDialogMessage)
+            .setNegativeButton(R.string.no) { _, _ ->
+                Prefs.save(PREFS_NOTIFICATION_PERMISSION_ASKED, true)
+                finishManagedPermissionPreflight(requestId, MAYAK_PERMISSION_PREFLIGHT_READY)
+            }
+            .setPositiveButton(R.string.yes) { _, _ ->
+                Prefs.save(PREFS_NOTIFICATION_PERMISSION_ASKED, true)
+                val current = activeManagedPermissionPreflight
+                if (current?.requestId != requestId || current.cancelled) return@setPositiveButton
+                current.notificationDialog = null
+                permissionRequestHandlers.remove(CHECK_NOTIFICATION_PERMISSION_ACTION_CODE)
+                if (!managedPermissionPreflightSerial.markSystemResultOutstanding(requestId)) {
+                    finishManagedPermissionPreflight(requestId, MAYAK_PERMISSION_PREFLIGHT_UNAVAILABLE)
+                    return@setPositiveButton
+                }
+                current.notificationResultOutstanding = true
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), CHECK_NOTIFICATION_PERMISSION_ACTION_CODE)
+            }
+            .create()
+        flow.notificationDialog = dialog
+        dialog.setOnCancelListener {
+            Prefs.save(PREFS_NOTIFICATION_PERMISSION_ASKED, true)
+            finishManagedPermissionPreflight(requestId, MAYAK_PERMISSION_PREFLIGHT_READY)
+        }
+        dialog.show()
+    }
+
+    @MainThread
+    private fun finishManagedPermissionPreflight(requestId: String, result: Int) {
+        val flow = activeManagedPermissionPreflight ?: return
+        if (!managedPermissionPreflightSerial.owns(requestId) || flow.requestId != requestId || flow.cancelled ||
+            flow.vpnResultOutstanding || flow.notificationResultOutstanding) return
+        val finalResult = if (result == MAYAK_PERMISSION_PREFLIGHT_READY && VpnService.prepare(applicationContext) != null)
+            MAYAK_PERMISSION_PREFLIGHT_DENIED else result
+        val next = managedPermissionPreflightSerial.finish(requestId)
+        requestedManagedPermissionPreflights.complete(requestId)
+        flow.notificationDialog = null
+        activeManagedPermissionPreflight = null
+        QtAndroidController.onManagedPermissionPreflightResult(requestId, finalResult)
+        next?.let(::startManagedPermissionPreflight)
     }
 
     private fun checkNotificationPermission(onChecked: () -> Unit) {
@@ -636,6 +950,11 @@ class AmneziaActivity : QtActivity() {
             if (isServiceConnected) {
                 if (proto.serviceClass == vpnProto?.serviceClass) {
                     vpnProto = proto
+                    // Inspection may have created a bound-only control service.
+                    // After VPN consent, start it before CONNECT so Android keeps
+                    // it alive when the Activity is unbound in the background.
+                    if (JSONObject(vpnConfig).optString("managedTicket").isNotBlank()
+                        && !startVpnService(vpnConfig, proto)) return
                     connectToVpn(vpnConfig)
                     return
                 }
@@ -643,9 +962,12 @@ class AmneziaActivity : QtActivity() {
             }
             vpnProto = proto
             isWaitingStatus = false
-            startVpnService(vpnConfig, proto)
+            if (!startVpnService(vpnConfig, proto)) return
             doBindService()
-        } ?: QtAndroidController.onServiceError()
+        } ?: run {
+            failManagedControlStart(vpnConfig)
+            QtAndroidController.onServiceError()
+        }
     }
 
     private fun getVpnProto(vpnConfig: String): VpnProto? = try {
@@ -668,17 +990,45 @@ class AmneziaActivity : QtActivity() {
         }
     }
 
-    private fun startVpnService(vpnConfig: String, proto: VpnProto) {
+    private fun startVpnService(vpnConfig: String, proto: VpnProto): Boolean {
         Log.d(TAG, "Start VPN service: $proto")
-        Intent(this, proto.serviceClass).apply {
+        return Intent(this, proto.serviceClass).apply {
             putExtra(MSG_VPN_CONFIG, vpnConfig)
-        }.also {
+        }.let {
             try {
                 ContextCompat.startForegroundService(this, it)
+                true
             } catch (e: SecurityException) {
                 Log.e(TAG, "Failed to start ${proto.serviceClass.simpleName}: $e")
+                failManagedControlStart(vpnConfig)
                 QtAndroidController.onServiceError()
+                false
             }
+        }
+    }
+
+    private fun failManagedControlStart(vpnConfig: String) {
+        runCatching { JSONObject(vpnConfig) }.getOrNull()?.let { config ->
+            val ticket = config.optString("managedTicket")
+            if (ticket.isNotBlank()) managedControlBindingLifetime.failStart(
+                ticket, config.optString("healthContextId"))
+        }
+    }
+
+    private fun consumeManagedControlResult(result: String) {
+        if (!managedControlBindingLifetime.acceptsCallbacks()) return
+        val event = runCatching { JSONObject(result) }.getOrNull() ?: return
+        when (event.optString("type")) {
+            "managedStopped" -> {
+                val consumed = managedControlBindingLifetime.stopAcknowledged(
+                    event.optString("stopRequestId"), event.optString("healthContextId"), event.optBoolean("stopped"))
+                if (consumed && !isActivityStarted && !managedControlBindingLifetime.shouldRetainBinding()) {
+                    // The exact stop has resolved; release a background-only control binding.
+                    doUnbindService()
+                }
+            }
+            "managedDenied" -> managedControlBindingLifetime.deny(
+                event.optString("ticket"), event.optString("healthContextId"))
         }
     }
 
@@ -699,22 +1049,104 @@ class AmneziaActivity : QtActivity() {
 
     @Suppress("unused")
     fun start(vpnConfig: String) {
-        Log.v(TAG, "Start VPN")
+        val config = runCatching { JSONObject(vpnConfig) }.getOrNull() ?: return
+        val managedTicket = config.optString("managedTicket")
+        val ticket = managedTicket.ifBlank { "legacy:" + java.util.UUID.randomUUID() }
+        if (!managedStarts.begin(ticket)) return
+        val startOnUiThread = {
+            // The ticket may have been cancelled while this invocation waited in
+            // the Android UI queue. No service/dialog operation is allowed then.
+            if (isFinishing || isDestroyed) {
+                if (managedTicket.isNotBlank()) reportManagedStartDenied(ticket, config)
+                else managedStarts.cancel(ticket)
+            } else if (managedStarts.accepts(ticket)) {
+                if (managedTicket.isNotBlank()) {
+                    // Consent was acquired before the allocation lease. Never open an OS prompt here.
+                    if (VpnService.prepare(applicationContext) != null) {
+                        reportManagedStartDenied(ticket, config)
+                    } else if (managedStarts.commit(ticket)) {
+                        val context = config.optString("healthContextId")
+                        if (!managedControlBindingLifetime.activate(ticket, context)) {
+                            reportManagedStartDenied(ticket, config)
+                        } else {
+                            if (!isServiceConnected) pendingManagedConfig = ticket to vpnConfig
+                            startVpn(vpnConfig)
+                        }
+                    }
+                } else {
+                    mainScope.launch {
+                        if (!managedStarts.accepts(ticket) || isFinishing || isDestroyed) return@launch
+                        checkVpnPermission(onDenied = {
+                            managedStarts.cancel(ticket)
+                        }) {
+                            if (managedStarts.accepts(ticket)) checkNotificationPermission {
+                                if (managedStarts.commit(ticket)) {
+                                    startVpn(vpnConfig)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) startOnUiThread()
+        else runOnUiThread { startOnUiThread() }
+    }
+
+    private fun reportManagedStartDenied(ticket: String, config: JSONObject) {
+        managedStarts.cancel(ticket)
+        managedControlBindingLifetime.deny(ticket, config.optString("healthContextId"))
+        QtAndroidController.onManagedLifecycle(JSONObject().put("type", "managedDenied")
+            .put("ticket", ticket).put("healthContextId", config.optString("healthContextId"))
+            .put("owner", "MayakVpnAwgLifecycleV1").toString())
+    }
+
+    @Suppress("unused")
+    fun cancelManaged(ticket: String) { managedStarts.cancel(ticket) }
+
+    @Suppress("unused")
+    fun managedStop(request: String, context: String, ticket: String) {
+        managedStarts.cancel(ticket) // synchronous, before queued main-thread work
+        val needsService = managedControlBindingLifetime.retainForStop(request, context, ticket)
         mainScope.launch {
-            checkVpnPermission {
-                checkNotificationPermission {
-                    startVpn(vpnConfig)
+            if (!needsService) {
+                QtAndroidController.onManagedLifecycle(JSONObject().put("type", "managedStopped")
+                    .put("owner", "MayakVpnAwgLifecycleV1").put("stopRequestId", request)
+                    .put("healthContextId", context).put("stopped", true).toString())
+            } else {
+                val msg = Action.MANAGED_STOP.packToMessage {
+                    putString("stopRequestId", request); putString("healthContextId", context)
+                    putString("managedTicket", ticket)
+                }
+                if (isServiceConnected) vpnServiceMessenger.send(msg, activityMessenger)
+                else {
+                    pendingManagedMessages.add(msg) // unavailable remains Unknown at Qt deadline
+                    if (!isInBoundState && vpnProto != null) doBindService(createIfMissing = true)
                 }
             }
         }
     }
 
     @Suppress("unused")
-    fun stop() {
-        Log.v(TAG, "Stop VPN")
+    fun managedInspect(request: String) {
+        managedStarts.invalidateAll()
         mainScope.launch {
-            disconnectFromVpn()
+            val msg = Action.MANAGED_INSPECT.packToMessage { putString("inspectRequestId", request) }
+            if (isServiceConnected) vpnServiceMessenger.send(msg, activityMessenger)
+            else {
+                pendingManagedMessages.add(msg)
+                // Bind/create our control service before asking it to prove Off.
+                // This does not establish a tunnel or bypass Android VPN consent.
+                if (vpnProto == null) vpnProto = VpnProto.AWG
+                if (!isInBoundState) doBindService(createIfMissing = true)
+            }
         }
+    }
+
+    @Suppress("unused")
+    fun stop() {
+        managedStarts.invalidateAll()
+        mainScope.launch { disconnectFromVpn() }
     }
 
     @Suppress("unused")
@@ -803,6 +1235,28 @@ class AmneziaActivity : QtActivity() {
                     Toast.makeText(this@AmneziaActivity, "Unsupported", Toast.LENGTH_LONG).show()
                 }
             }
+        }
+    }
+
+    @Suppress("unused")
+    fun installUpdateApk(path: String): Int {
+        val apk = File(path)
+        if (!apk.isFile || !apk.name.endsWith(".apk", ignoreCase = true)) return 0
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && !packageManager.canRequestPackageInstalls()) {
+                startActivity(Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES, Uri.parse("package:$packageName")))
+                2
+            } else {
+                val uri = FileProvider.getUriForFile(this, packageName + FILE_PROVIDER_AUTHORITY_SUFFIX, apk)
+                startActivity(Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                })
+                1
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Could not open the Android package installer")
+            0
         }
     }
 

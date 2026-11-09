@@ -68,8 +68,10 @@ LocalServer::LocalServer(QObject *parent) : QObject(parent),
 
 #ifdef Q_OS_WIN
     // Signal handling for a proper shutdown.
-    QObject::connect(qApp, &QCoreApplication::aboutToQuit,
-                     []() { WindowsDaemon::instance()->deactivate(); });
+    // The service stop handler destroys LocalServer before quitting the event
+    // loop. Bind the callback to its owner so it cannot use the destroyed daemon.
+    QObject::connect(qApp, &QCoreApplication::aboutToQuit, this,
+                     [this]() { daemon.deactivate(); });
 #endif
 }
 

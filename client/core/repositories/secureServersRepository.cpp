@@ -293,6 +293,26 @@ void SecureServersRepository::editServer(const QString &serverId, const QJsonObj
     emit serverEdited(serverId);
 }
 
+bool SecureServersRepository::editServerAndSync(const QString &serverId, const QJsonObject &serverJson,
+                                                serverConfigUtils::ConfigType kind)
+{
+    const auto previous = m_serverJsonById.constFind(serverId);
+    if (previous == m_serverJsonById.cend()) return false;
+    const QJsonObject oldJson = *previous;
+    editServer(serverId, serverJson, kind);
+    const auto current = m_serverJsonById.constFind(serverId);
+    if (current == m_serverJsonById.cend() || withoutStorageServerId(*current) != withoutStorageServerId(serverJson))
+        return false;
+    QJsonArray serversArray;
+    for (const QString &id : m_orderedServerIds) {
+        if (m_serverJsonById.contains(id)) serversArray.append(m_serverJsonById.value(id));
+    }
+    if (m_settings->setEncryptedValueAndSync(QStringLiteral("Servers/serversList"), QJsonDocument(serversArray).toJson()))
+        return true;
+    editServer(serverId, oldJson, serverConfigUtils::configTypeFromJson(withoutStorageServerId(oldJson)));
+    return false;
+}
+
 void SecureServersRepository::removeServer(const QString &serverId)
 {
     const int removedIndex = indexOfServerId(serverId);

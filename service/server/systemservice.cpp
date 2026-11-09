@@ -15,7 +15,11 @@ char** s_argv = nullptr;
 SystemService::SystemService(int argc, char **argv)
     : QtService<QCoreApplication>(argc, argv, SERVICE_NAME)
 {
+#ifdef Q_OS_WIN
+    setServiceDescription("Service for Mayak VPN");
+#else
     setServiceDescription("Service for AmneziaVPN");
+#endif
 
 #ifdef Q_OS_WIN
     if(argc > 2){
@@ -45,5 +49,10 @@ void SystemService::start()
 
 void SystemService::stop()
 {
+    if (!m_localServer) return;
+#ifdef Q_OS_WIN
+    m_localServer->daemon.deactivate();
+#endif
     delete m_localServer;
+    m_localServer = nullptr;
 }

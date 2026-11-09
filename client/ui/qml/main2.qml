@@ -217,6 +217,11 @@ Window  {
         id: questionDrawer
     }
 
+    MayakUpdatePrompt {
+        id: mayakUpdatePrompt
+        focusTarget: root.activeFocusItem
+    }
+
     SubscriptionExpiredDrawer {
         id: subscriptionExpiredDrawer
     }

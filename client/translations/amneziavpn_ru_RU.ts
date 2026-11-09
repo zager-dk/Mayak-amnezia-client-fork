@@ -6127,6 +6127,11 @@ Only one can be active at a time: VPN or local proxy</source>
         <translation>Не удалось скачать. Загрузите вручную с amnezia.org</translation>
     </message>
     <message>
+        <location filename="../ui/qml/Pages2/PageUpdate.qml" line="31"/>
+        <source>Update download failed. You can retry.</source>
+        <translation>Не удалось загрузить обновление. Можно попробовать ещё раз.</translation>
+    </message>
+    <message>
         <location filename="../ui/qml/Pages2/PageUpdate.qml" line="167"/>
         <source>New version available</source>
         <translation>Доступна новая версия</translation>
@@ -6171,6 +6176,16 @@ Only one can be active at a time: VPN or local proxy</source>
         <location filename="../ui/qml/Pages2/PageUpdate.qml" line="234"/>
         <source>Retry</source>
         <translation>Повторить</translation>
+    </message>
+    <message>
+        <location filename="../ui/qml/Pages2/PageUpdate.qml" line="223"/>
+        <source>Update download progress</source>
+        <translation>Ход загрузки обновления</translation>
+    </message>
+    <message>
+        <location filename="../ui/qml/Pages2/PageUpdate.qml" line="285"/>
+        <source>Cancel download</source>
+        <translation>Отменить загрузку</translation>
     </message>
 </context>
 <context>

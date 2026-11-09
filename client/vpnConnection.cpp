@@ -10,6 +10,7 @@
 #include <QString>
 #include <QStringList>
 #include <QTimer>
+#include <QThread>
 
 #include <core/configurators/openVpnConfigurator.h>
 #include <core/configurators/wireguardConfigurator.h>
@@ -35,6 +36,16 @@
 #include "vpnConnection.h"
 
 using namespace ProtocolUtils;
+
+struct VpnConnection::ManagedBackend {
+    MayakBackendBridge::Ticket ticket;
+    AwgHealthContext expected;
+    QSharedPointer<VpnProtocol> protocol;
+    QPointer<MayakTunnelProbe> probe;
+    QString inspectedIdentity;
+    std::function<void(MayakBackendBridge::Ticket, AwgTunnelHealth)> health;
+    MayakBackendBridge::Done event;
+};
 
 VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureAppSettingsRepository* appSettingsRepository, QObject *parent)
     : QObject(parent),
@@ -323,6 +334,7 @@ Vpn::ConnectionState VpnConnection::connectionState() const
 
 void VpnConnection::connectToVpn(const QString &serverId, DockerContainer container, const QJsonObject &vpnConfiguration)
 {
+    if (m_managedBackend && (m_managedBackend->ticket.valid() || m_managedBackend->protocol)) return; // managed owner must drain first
     if (!m_appSettingsRepository || !m_serversRepository) {
         qCritical() << "VpnConnection::connectToVpn: repositories not initialized";
         setConnectionState(Vpn::ConnectionState::Error);
@@ -382,6 +394,12 @@ void VpnConnection::createProtocolConnections()
     connect(m_vpnProtocol.data(), &VpnProtocol::protocolError, this, &VpnConnection::vpnProtocolError);
     connect(m_vpnProtocol.data(), &VpnProtocol::connectionStateChanged, this, &VpnConnection::setConnectionState);
     connect(m_vpnProtocol.data(), SIGNAL(bytesChanged(quint64, quint64)), this, SLOT(onBytesChanged(quint64, quint64)));
+#ifdef AMNEZIA_DESKTOP
+    if (auto* wireguard = qobject_cast<WireguardProtocol*>(m_vpnProtocol.data())) {
+        connect(wireguard, &WireguardProtocol::awgTunnelHealthUpdated,
+                this, &VpnConnection::onAwgTunnelHealth);
+    }
+#endif
 
 #ifdef AMNEZIA_DESKTOP
     IpcClient::withInterface([this](QSharedPointer<IpcInterfaceReplica> rep) {
@@ -540,6 +558,8 @@ void VpnConnection::createAndroidConnections()
     connect(AndroidController::instance(), &AndroidController::connectionStateChanged, androidVpnProtocol,
             &AndroidVpnProtocol::setConnectionState);
     connect(AndroidController::instance(), &AndroidController::statisticsUpdated, androidVpnProtocol, &AndroidVpnProtocol::setBytesChanged);
+    connect(AndroidController::instance(), &AndroidController::awgTunnelHealthUpdated,
+            this, &VpnConnection::onAwgTunnelHealth, Qt::UniqueConnection);
 }
 
 AndroidVpnProtocol *VpnConnection::createDefaultAndroidVpnProtocol()
@@ -548,6 +568,27 @@ AndroidVpnProtocol *VpnConnection::createDefaultAndroidVpnProtocol()
 }
 #endif
 
+AwgHealthContext VpnConnection::expectedAwgHealthContext() const
+{
+#ifdef Q_OS_ANDROID
+    return AndroidController::instance()->expectedAwgHealthContext();
+#elif defined(AMNEZIA_DESKTOP)
+    if (auto* protocol = qobject_cast<WireguardProtocol*>(m_vpnProtocol.data()))
+        return protocol->expectedAwgHealthContext();
+#endif
+    return {};
+}
+
+void VpnConnection::onAwgTunnelHealth(const AwgTunnelHealth& health)
+{
+    Q_ASSERT(QThread::currentThread() == thread());
+    // Recheck at final delivery: a queued sample may outlive its source activation.
+    if (m_connectionState != Vpn::ConnectionState::Connecting &&
+        m_connectionState != Vpn::ConnectionState::Connected) return;
+    if (!expectedAwgHealthContext().matches(health)) return;
+    emit awgTunnelHealthUpdated(health);
+}
+
 QString VpnConnection::bytesPerSecToText(quint64 bytes)
 {
     double mbps = bytes * 8 / 1e6;
@@ -555,6 +596,7 @@ QString VpnConnection::bytesPerSecToText(quint64 bytes)
 }
 
 void VpnConnection::reconnectToVpn() {
+    if (m_managedBackend && (m_managedBackend->ticket.valid() || m_managedBackend->protocol)) return; // no autonomous trusted activation
     if (m_vpnProtocol.isNull())
         return;
 
@@ -577,6 +619,7 @@ void VpnConnection::reconnectToVpn() {
 
 void VpnConnection::disconnectFromVpn()
 {
+    if (m_managedBackend && (m_managedBackend->ticket.valid() || m_managedBackend->protocol)) return; // managed stop retains protocol until exact ACK
 #if defined(Q_OS_IOS) || defined(MACOS_NE)
     // iOS/macOS NE use IosController directly; m_vpnProtocol is not set there.
     IosController::Instance()->disconnectVpn();
@@ -619,4 +662,286 @@ void VpnConnection::setConnectionState(Vpn::ConnectionState state) {
 
     m_connectionState = state;
     emit connectionStateChanged(state);
+}
+
+// Tagged managed lifecycle. Prepared configuration is already complete on GUI;
+// this path does not access either repository or legacy route/state callbacks.
+MayakBackendBridge::Port VpnConnection::managedBackendPort() {
+    using B = MayakBackendBridge;
+    const QPointer<VpnConnection> self(this);
+#ifdef Q_OS_ANDROID
+    const QPointer<AndroidController> android(AndroidController::instance());
+#endif
+    B::Port port;
+    port.owner = this;
+    port.preparePermissions = [
+#ifdef Q_OS_ANDROID
+        android
+#endif
+    ](QString requestId, B::PermissionDone done) mutable {
+#ifdef Q_OS_ANDROID
+        if (!android) { if (done) done(requestId, B::PermissionResult::Unavailable); return; }
+        android->prepareManagedPermissions(requestId, [done = std::move(done)](const QString &id,
+                                      AndroidController::ManagedPermissionResult result) mutable {
+            if (!done) return;
+            const auto mapped = result == AndroidController::ManagedPermissionResult::Ready ? B::PermissionResult::Ready :
+                result == AndroidController::ManagedPermissionResult::Denied ? B::PermissionResult::Denied : B::PermissionResult::Unavailable;
+            done(id, mapped);
+        });
+#else
+        if (done) done(requestId, B::PermissionResult::Ready);
+#endif
+    };
+    port.cancelPermissionPreparation = [
+#ifdef Q_OS_ANDROID
+        android
+#endif
+    ](QString requestId) {
+#ifdef Q_OS_ANDROID
+        if (android) android->cancelManagedPermissionPreparation(requestId);
+#else
+        Q_UNUSED(requestId);
+#endif
+    };
+    port.observe = [self](QObject* receiver, std::function<void(B::Ticket, AwgTunnelHealth)> health, B::Done event) {
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        if (!self->m_managedBackend) self->m_managedBackend = std::make_shared<ManagedBackend>();
+        const auto s = self->m_managedBackend;
+        const QPointer<QObject> target(receiver);
+        s->health = [target, health](B::Ticket t, AwgTunnelHealth h) { if (target && health) health(t, h); };
+        s->event = [target, event](B::Result r) { if (target && event) event(r); };
+    };
+    port.start = [self
+#ifdef Q_OS_ANDROID
+        , android
+#endif
+    ](B::Ticket t, QString serverId, QJsonObject config, B::Millis deadline, B::Done done) {
+        Q_UNUSED(serverId);
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        if (!self->m_managedBackend) self->m_managedBackend = std::make_shared<ManagedBackend>();
+        const auto s = self->m_managedBackend;
+        if (s->ticket.valid() || self->m_vpnProtocol || !t.valid()) { done({t, B::Outcome::Busy}); return; }
+        if (B::monotonicMillis() >= deadline) t.gate->cancel();
+        if (t.gate->state.load() != B::StartGate::Pending) { done({t, B::Outcome::Cancelled}); return; }
+        const QString proto = config.value("protocol").toString();
+        if (proto != "awg" && proto != "wireguard") { done({t, B::Outcome::Failed, {}, {}, QStringLiteral("AWG required")}); return; }
+        s->ticket = t;
+#ifdef AMNEZIA_DESKTOP
+        // Existing AWG protocol wrapper, never a second backend implementation.
+        auto* wg = new WireguardProtocol(config);
+        wg->useManagedLifecycle();
+        s->protocol.reset(wg);
+        const std::weak_ptr<ManagedBackend> weak = s;
+        connect(wg, &WireguardProtocol::awgTunnelHealthUpdated, self, [self, weak](const AwgTunnelHealth& h) {
+            const auto s = weak.lock();
+            if (!self || !s || !s->expected.matches(h)) return;
+            if (s->health) s->health(s->ticket, h);
+        });
+        connect(wg, &VpnProtocol::protocolError, self, [self, weak](ErrorCode) {
+            const auto s = weak.lock();
+            if (self && s && s->event) s->event({s->ticket, B::Outcome::Failed, s->expected});
+        });
+        // This check is the linearization point immediately before native start.
+        if (B::monotonicMillis() >= deadline || !t.gate->commit()) {
+            t.gate->cancel(); s->protocol.reset(); s->ticket = {};
+            done({t, B::Outcome::Cancelled}); return;
+        }
+        const ErrorCode err = wg->start();
+        s->expected = wg->expectedAwgHealthContext(); // VPN owner thread only
+        done({t, err == ErrorCode::NoError ? B::Outcome::Started : B::Outcome::Failed, s->expected});
+#elif defined(Q_OS_ANDROID)
+        if (!android) { done({t, B::Outcome::Unknown}); return; }
+        QMetaObject::invokeMethod(android, [self, android, s, t, config, deadline, done] {
+            if (!android || B::monotonicMillis() >= deadline || !t.gate->commit()) {
+                t.gate->cancel();
+                if (self) QMetaObject::invokeMethod(self, [done,t] { done({t,B::Outcome::Cancelled}); }, Qt::QueuedConnection);
+                return;
+            }
+            QJsonObject tagged = config;
+            tagged.insert("managedTicket", t.opaqueAttempt);
+            android->start(tagged);
+            const AwgHealthContext expected = android->expectedAwgHealthContext();
+            if (self) QMetaObject::invokeMethod(self, [self, s, t, expected, done] {
+                if (!self || self->m_managedBackend != s || !s->ticket.same(t)) return;
+                s->expected = expected;
+                done({t,B::Outcome::Started,expected});
+            }, Qt::QueuedConnection);
+        }, Qt::QueuedConnection);
+        connect(android, &AndroidController::managedDenied, self, [self,s,t](QString ticket, QString context) {
+            if (!self || self->m_managedBackend != s || !s->ticket.same(t) || ticket != t.opaqueAttempt || context != s->expected.id) return;
+            if (s->event) s->event({t,B::Outcome::Failed,s->expected,{},QStringLiteral("permissionDenied")});
+        });
+        connect(android, &AndroidController::awgTunnelHealthUpdated, self, [self,s,t](AwgTunnelHealth h) {
+            if (self && self->m_managedBackend == s && s->ticket.same(t) && s->expected.matches(h) && s->health) s->health(t,h);
+        });
+#else
+        done({t, B::Outcome::Unknown});
+#endif
+    };
+    port.cancel = [self
+#ifdef Q_OS_ANDROID
+        , android
+#endif
+    ](B::Ticket t) {
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        const auto s = self->m_managedBackend;
+        if (!s || !s->ticket.same(t)) return;
+        if (s->probe) { s->probe->cancel(); s->probe->deleteLater(); s->probe = nullptr; }
+#ifdef Q_OS_ANDROID
+        if (android) QMetaObject::invokeMethod(android, [android,t] { if (android) android->cancelManaged(t.opaqueAttempt); }, Qt::QueuedConnection);
+#endif
+    };
+    port.stop = [self
+#ifdef Q_OS_ANDROID
+        , android
+#endif
+    ](B::Ticket t, QString nonce, B::Millis deadline, B::Done done) {
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        auto s = self->m_managedBackend;
+        B::Result result{t, B::Outcome::Unknown}; result.requestId = nonce;
+        qInfo() << "MayakStopPort stage=entry ticket_valid=" << t.valid()
+                << "owner_present=" << bool(s) << "gate_state="
+                << (t.valid() ? int(t.gate->state.load()) : -1);
+        // A canceled, never-committed ticket is Off by the shared linearization
+        // gate. This is not a native/legacy disconnected assertion.
+        if (t.valid() && t.gate->state.load() == B::StartGate::Cancelled && (!s || !s->ticket.valid() || s->ticket.same(t))) {
+            if (s && s->ticket.same(t)) { s->ticket = {}; s->protocol.clear(); }
+            result.outcome = B::Outcome::ConfirmedDown;
+            qInfo() << "MayakStopPort result=confirmed_down reason=never_committed";
+            done(result); return;
+        }
+        if (!s || !s->ticket.same(t)) {
+            qInfo() << "MayakStopPort result=unknown reason=owner_or_ticket_mismatch";
+            done(result); return;
+        }
+        result.expected = s->expected;
+        const QString context = s->expected.id.isEmpty() ? s->inspectedIdentity : s->expected.id;
+        const qint64 remainingMs = deadline - B::monotonicMillis();
+        if (context.isEmpty() || remainingMs <= 0) {
+            qInfo() << "MayakStopPort result=unknown context_present=" << !context.isEmpty()
+                    << "remaining_ms=" << remainingMs;
+            done(result); return;
+        }
+        qInfo() << "MayakStopPort stage=dispatch context_present=true remaining_ms=" << remainingMs;
+        auto completed = std::make_shared<bool>(false);
+        auto finish = [self,s,result,done,completed,deadline](QString request, QString actual, bool stopped) mutable {
+            const bool requestMatch = request == result.requestId;
+            const bool contextMatch = actual == (s->expected.id.isEmpty() ? s->inspectedIdentity : s->expected.id);
+            const bool ownerMatch = self && self->m_managedBackend == s;
+            const bool ticketMatch = ownerMatch && s->ticket.same(result.ticket);
+            if (!requestMatch || !contextMatch || !ticketMatch) {
+                qInfo() << "MayakStopPortAck accepted=false request_match=" << requestMatch
+                        << "context_match=" << contextMatch << "owner_match=" << ownerMatch
+                        << "ticket_match=" << ticketMatch;
+                return;
+            }
+            qInfo() << "MayakStopPortAck accepted=true stopped=" << stopped
+                    << "operation_pending=" << !*completed
+                    << "remaining_ms=" << (deadline - B::monotonicMillis());
+            result.outcome = stopped ? B::Outcome::ConfirmedDown : B::Outcome::Failed;
+            // Retain until true ACK even if the bounded caller already expired.
+            const auto retained = s->protocol;
+            if (stopped) {
+                s->expected = {};
+                s->ticket = {}; s->inspectedIdentity.clear(); s->protocol.clear();
+                if (s->event) s->event(result);
+                if (!self) return;
+            }
+            if (!*completed) {
+                *completed = true;
+                if (B::monotonicMillis() >= deadline) result.outcome = B::Outcome::Deadline;
+                qInfo() << "MayakStopPort result outcome=" << int(result.outcome)
+                        << "remaining_ms=" << (deadline - B::monotonicMillis());
+                done(result);
+            }
+        };
+        QTimer::singleShot(int(qMax<qint64>(0, deadline-B::monotonicMillis())), self, [result,done,completed,deadline] () mutable {
+            if (*completed) return; *completed = true; result.outcome = B::Outcome::Deadline;
+            qInfo() << "MayakStopPortAck accepted=false reason=deadline outcome=" << int(result.outcome)
+                    << "remaining_ms=" << (deadline - B::monotonicMillis());
+            done(result);
+        });
+#ifdef AMNEZIA_DESKTOP
+        auto* wg = qobject_cast<WireguardProtocol*>(s->protocol.data());
+        if (!wg) { done(result); *completed = true; return; }
+        connect(wg, &WireguardProtocol::managedStopped, self, finish);
+        wg->managedDeactivate(nonce, context);
+#elif defined(Q_OS_ANDROID)
+        if (!android) return;
+        connect(android, &AndroidController::managedStopped, self, finish);
+        QMetaObject::invokeMethod(android, [android,nonce,context,t] { if (android) android->managedStop(nonce,context,t.opaqueAttempt); }, Qt::QueuedConnection);
+#else
+        done(result); *completed = true;
+#endif
+    };
+    port.inspect = [self
+#ifdef Q_OS_ANDROID
+        , android
+#endif
+    ](QString nonce, B::Millis deadline, B::Inspected done) {
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        if (!self->m_managedBackend) self->m_managedBackend = std::make_shared<ManagedBackend>();
+        const auto s = self->m_managedBackend;
+        if (s->ticket.valid()) {
+            s->ticket.gate->cancel();
+            if (s->ticket.gate->state.load() == B::StartGate::Cancelled) {
+                s->ticket = {}; s->expected = {}; s->protocol.clear();
+            }
+        }
+        auto complete = std::make_shared<bool>(false);
+        auto finish = [self,s,nonce,deadline,done,complete](QString request, QString state, QString identity) {
+            if (!self || *complete || request != nonce) return;
+            *complete = true;
+            B::Inspection result{B::OwnState::Unknown,nonce,{}};
+            if (B::monotonicMillis() < deadline && self->m_managedBackend == s) {
+                if (state == "off" && !s->ticket.valid()) { result.state = B::OwnState::Off; s->ticket = {}; s->inspectedIdentity.clear(); s->protocol.clear(); }
+                if (state == "active" && !identity.isEmpty()) {
+                    result.state = B::OwnState::Active; result.ownControlIdentity = identity;
+                    if (!s->ticket.valid()) {
+                        s->ticket = {QStringLiteral("recovery:")+identity, std::make_shared<B::StartGate>()};
+                        s->ticket.gate->commit(); s->inspectedIdentity = identity;
+                    }
+                    result.recoveryTicket = s->ticket;
+                }
+            }
+            done(result);
+        };
+        QTimer::singleShot(int(qMax<qint64>(0, deadline-B::monotonicMillis())), self, [finish,nonce] { finish(nonce, "unknown", {}); });
+#ifdef AMNEZIA_DESKTOP
+        auto* wg = qobject_cast<WireguardProtocol*>(s->protocol.data());
+        if (!wg) { wg = new WireguardProtocol(QJsonObject{}); s->protocol.reset(wg); }
+        connect(wg, &WireguardProtocol::managedInspected, self, finish);
+        wg->inspectOwnBackend(nonce);
+#elif defined(Q_OS_ANDROID)
+        if (!android) return;
+        connect(android, &AndroidController::managedInspected, self, finish);
+        QMetaObject::invokeMethod(android, [android,nonce] { if (android) android->managedInspect(nonce); }, Qt::QueuedConnection);
+#else
+        finish(nonce,"unknown",{});
+#endif
+    };
+    port.probe = [self](B::Ticket t, MayakTunnelProbeRequest request, B::Millis deadline, B::Probed done) {
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        const auto s = self->m_managedBackend;
+        if (!s || !s->ticket.same(t) || s->expected.id.isEmpty() || s->probe || request.attemptTag != t.opaqueAttempt) {
+            done(t,false,{},QStringLiteral("invalid-current-ticket")); return;
+        }
+        auto* probe = new MayakTunnelProbe(self);
+        s->probe = probe;
+        request.deadlineMs = int(qMin<qint64>(request.deadlineMs,qMax<qint64>(0,deadline-B::monotonicMillis())));
+        connect(probe,&MayakTunnelProbe::finished,self,[self,s,t,done,probe](quint64,bool ok,MayakTunnelProbeProof proof,QString error) {
+            probe->deleteLater();
+            if (!self || self->m_managedBackend != s || !s->ticket.same(t) || s->probe != probe) return;
+            s->probe = nullptr;
+            done(t,ok,proof,error);
+        });
+        probe->start(request);
+    };
+    return port;
 }

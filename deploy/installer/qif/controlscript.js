@@ -21,8 +21,8 @@ function appExecutableFileName()
 function appInstalled()
 {
     if (runningOnWindows()) {
-        appInstalledUninstallerPath = installer.value("RootDir") + "Program Files/AmneziaVPN/maintenancetool.exe";
-        appInstalledUninstallerPath_x86 = installer.value("RootDir") + "Program Files (x86)/AmneziaVPN/maintenancetool.exe";
+        appInstalledUninstallerPath = installer.value("RootDir") + "Program Files/MayakVPN/maintenancetool.exe";
+        appInstalledUninstallerPath_x86 = installer.value("RootDir") + "Program Files (x86)/MayakVPN/maintenancetool.exe";
     } else if (runningOnMacOS()){
         appInstalledUninstallerPath = "/Applications/" + appName() + ".app/maintenancetool.app/Contents/MacOS/maintenancetool";
     } else if (runningOnLinux()){
@@ -119,13 +119,14 @@ function requestToQuit(installer,gui)
     gui.clickButton(buttons.CancelButton);
 
     if (runningOnWindows()) {
-        installer.setCancelled();
+        installer.setCanceled();
     }
 }
 
 
 Controller.prototype.PerformInstallationPageCallback = function()
 {
+    if (runningOnWindows()) return;
     gui.clickButton(buttons.NextButton);
 }
 
@@ -227,6 +228,13 @@ onNextButtonClicked = function()
 function Controller () {
     console.log("OS: %1, architecture: %2".arg(systemInfo.prettyProductName).arg(systemInfo.currentCpuArchitecture));
 
+    if (runningOnWindows() && (installer.isUpdater() || installer.isPackageManager())) {
+        QMessageBox.critical("Mayak VPN", "Use the full Mayak installer",
+            qsTr("Online maintenance updates are not supported in this release. Use the verified full installer offered by the Mayak app, or download that full installer manually."));
+        installer.setCanceled();
+        return;
+    }
+
     if (installer.isInstaller() || installer.isUpdater()) {
         console.log("Check if app already installed: " + appInstalled());
     }
@@ -238,7 +246,7 @@ function Controller () {
     if (installer.isInstaller()) {
         installer.setDefaultPageVisible(QInstaller.ComponentSelection, false);
         installer.setDefaultPageVisible(QInstaller.TargetDirectory, false);
-        installer.setDefaultPageVisible(QInstaller.StartMenuDirectoryPage, false);
+        installer.setDefaultPageVisible(QInstaller.StartMenuSelection, false);
         installer.setDefaultPageVisible(QInstaller.LicenseCheck, false);
 
         isDesktopAppProcessRunningMessageLoop();
@@ -252,52 +260,26 @@ function Controller () {
             installer.setMessageBoxAutomaticAnswer("OverwriteTargetDirectory", QMessageBox.Yes);
         }
 
-        if (appInstalled()) {
-            if (QMessageBox.Ok === QMessageBox.information("os.information", appName(),
-                                                           qsTr("The application is already installed.") + " " +
-                                                           qsTr("We need to remove the old installation first. Do you wish to proceed?"),
-                                                           QMessageBox.Ok | QMessageBox.Cancel)) {
-
-
-                if (appInstalled()) {
-                    var resultArray = [];
-
-                    if (installer.fileExists(appInstalledUninstallerPath_x86)) {
-                        console.log("Starting uninstallation " + appInstalledUninstallerPath_x86);
-                        resultArray = installer.execute(appInstalledUninstallerPath_x86);
-                    }
-
-                    if (installer.fileExists(appInstalledUninstallerPath)) {
-                        console.log("Starting uninstallation " + appInstalledUninstallerPath);
-                        resultArray = installer.execute(appInstalledUninstallerPath);
-                    }
-
-                    console.log("Uninstaller finished with code: " + resultArray[1])
-
-                    if (Number(resultArray[1]) !== 0) {
-                        console.log("Uninstallation aborted by user");
-                        installer.setCancelled();
-                        return;
-                    } else {
-                        for (var i = 0; i < 300; i++) {
-                            sleep(100);
-                            if (!installer.fileExists(appInstalledUninstallerPath)) {
-                                break;
-                            }
-                        }
-                    }
-                }
-
-                raiseInstallerWindow();
-
-            } else {
-                console.log("Request to quit from user");
-                installer.setCancelled();
-                return;
-            }
+        var existingMayak = appInstalled();
+        var installNotice = existingMayak
+                ? qsTr("MayakVPN is already installed. Install this update in place? Existing service registration and recovery settings will be preserved. The installer will close the MayakVPN app and service temporarily while replacing files.")
+                : qsTr("Install MayakVPN in the selected folder? Setup may temporarily close the MayakVPN app and stop its service in that folder before replacing files. Other VPN apps and services will not be changed.");
+        if (!runningOnWindows() && existingMayak && QMessageBox.Ok !== QMessageBox.information(
+                "os.information", appName(),
+                installNotice,
+                QMessageBox.Ok | QMessageBox.Cancel)) {
+            installer.setCanceled();
+            return;
         }
 
     } else if (installer.isUninstaller()) {
+        if (runningOnWindows() && QMessageBox.Ok !== QMessageBox.information(
+                "os.information", appName(),
+                qsTr("Remove MayakVPN? The installer will close the MayakVPN app and stop its service."),
+                QMessageBox.Ok | QMessageBox.Cancel)) {
+            installer.setCanceled();
+            return;
+        }
         isDesktopAppProcessRunningMessageLoop();
 
         if (requestToQuitFromApp === true) {
@@ -318,6 +300,11 @@ isDesktopAppProcessRunningMessageLoop = function ()
     if (requestToQuitFromApp === true) {
         return;
     }
+
+    // On Windows, the exact-target process check belongs to the signed
+    // component script's pre-extraction hook. Avoid tasklist basename matches
+    // and avoid UI from a background updater.
+    if (runningOnWindows()) return;
 
     if (installer.isUpdater()) {
         for (var i = 0; i < 400; i++) {

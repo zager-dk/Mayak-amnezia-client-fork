@@ -27,6 +27,7 @@ set(CMAKE_AUTOUIC ON)
 qt6_add_resources(TEST_QRC
     ../server_scripts/serverScripts.qrc
     ../resources/countries.qrc
+    ../../mayak/update_signing_key.qrc
 )
 
 set(_main_cpp "${CMAKE_CURRENT_SOURCE_DIR}/../main.cpp")
@@ -34,6 +35,49 @@ get_filename_component(_main_cpp "${_main_cpp}" REALPATH)
 
 set(TEST_SOURCES ${SOURCES})
 list(REMOVE_ITEM TEST_SOURCES "${_main_cpp}")
+
+# The Windows QtKeychain backend addresses credentials by key alone, ignoring
+# service. Isolate both names in the test copy without changing the production
+# implementation or replacing the operating system's secure storage.
+string(SHA256 _test_keychain_hash "${CMAKE_CURRENT_BINARY_DIR}")
+string(SUBSTRING "${_test_keychain_hash}" 0 16 _test_keychain_hash)
+set(_test_keychain_service "Mayak-Client-Tests-${_test_keychain_hash}")
+get_filename_component(_secure_settings_cpp "${CMAKE_CURRENT_SOURCE_DIR}/../secureQSettings.cpp" REALPATH)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${_secure_settings_cpp}")
+file(READ "${_secure_settings_cpp}" _test_secure_settings_source)
+foreach(_tag settingsKeyTag settingsIvTag)
+    foreach(_platform_tag "MayakVPN-Client/${_tag}" "${_tag}")
+        set(_production_tag_definition
+            "const QString ${_tag} = QStringLiteral(\"${_platform_tag}\");")
+        string(FIND "${_test_secure_settings_source}" "${_production_tag_definition}" _tag_position)
+        if(_tag_position EQUAL -1)
+            message(FATAL_ERROR "SecureQSettings ${_tag} credential mapping changed; review generated test isolation")
+        endif()
+        set(_test_tag_definition
+            "const QString ${_tag} = QStringLiteral(\"${_test_keychain_service}/${_tag}-%1\").arg(QCoreApplication::applicationPid());")
+        string(REPLACE "${_production_tag_definition}" "${_test_tag_definition}"
+            _test_secure_settings_source "${_test_secure_settings_source}")
+    endforeach()
+endforeach()
+string(PREPEND _test_secure_settings_source "#include <QCoreApplication>\n")
+string(REPLACE "CLIENT_KEYCHAIN_NAME_STR" "AMNEZIA_TEST_KEYCHAIN_NAME_STR"
+    _test_secure_settings_source "${_test_secure_settings_source}")
+set(_test_secure_settings_cpp "${CMAKE_CURRENT_BINARY_DIR}/testSecureQSettings.cpp")
+file(GENERATE OUTPUT "${_test_secure_settings_cpp}" CONTENT "${_test_secure_settings_source}")
+set(_test_secure_settings_replaced FALSE)
+foreach(_source IN LISTS TEST_SOURCES)
+    get_filename_component(_source_real "${_source}" REALPATH)
+    if(_source_real STREQUAL _secure_settings_cpp)
+        list(REMOVE_ITEM TEST_SOURCES "${_source}")
+        set(_test_secure_settings_replaced TRUE)
+    endif()
+endforeach()
+if(NOT _test_secure_settings_replaced)
+    message(FATAL_ERROR "SecureQSettings source missing from test_common; review test isolation")
+endif()
+list(APPEND TEST_SOURCES "${_test_secure_settings_cpp}")
+set_source_files_properties("${_test_secure_settings_cpp}" PROPERTIES
+    COMPILE_DEFINITIONS "AMNEZIA_TEST_KEYCHAIN_NAME_STR=\"${_test_keychain_service}\"")
 
 add_library(test_common OBJECT
     ${TEST_SOURCES}
@@ -53,6 +97,8 @@ target_link_libraries(test_common PUBLIC
 )
 
 target_compile_definitions(test_common PUBLIC AMNEZIA_BUILD_TESTS)
+target_compile_definitions(test_common INTERFACE
+    AMNEZIA_TEST_KEYCHAIN_NAME_STR="${_test_keychain_service}")
 
 target_include_directories(test_common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

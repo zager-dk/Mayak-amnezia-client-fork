@@ -27,6 +27,8 @@ class WireguardUtils : public QObject {
     qint64 m_handshake = 0;
     qint64 m_rxBytes = 0;
     qint64 m_txBytes = 0;
+    bool m_hasHandshake = false;
+    bool m_statsValid = false;
   };
 
   explicit WireguardUtils(QObject* parent) : QObject(parent){};

@@ -12,6 +12,8 @@
 #include "core/utils/errorCodes.h"
 #include "core/utils/routeModes.h"
 #include "core/utils/commonStructs.h"
+#include "core/utils/awgTunnelHealth.h"
+#include "core/controllers/mayakBackendBridge.h"
 #include "core/repositories/secureServersRepository.h"
 #include "core/repositories/secureAppSettingsRepository.h"
 
@@ -39,7 +41,12 @@ public:
     Vpn::ConnectionState connectionState() const;
 
     QSharedPointer<VpnProtocol> vpnProtocol() const;
+    // Owner-thread API for adapters: capture id + configured hex peer + numeric endpoint.
+    // Empty context means that no current activation can provide trusted AWG health.
+    AwgHealthContext expectedAwgHealthContext() const;
 
+    // Safe facade construction seam; lambdas dispatch only on this->thread().
+    MayakBackendBridge::Port managedBackendPort();
     const QString &remoteAddress() const;
     void addSitesRoutes(const QString &gw, amnezia::RouteMode mode);
 
@@ -60,6 +67,7 @@ public slots:
 
 signals:
     void bytesChanged(quint64 receivedBytes, quint64 sentBytes);
+    void awgTunnelHealthUpdated(const AwgTunnelHealth& health);
     void connectionStateChanged(Vpn::ConnectionState state);
     void vpnProtocolError(amnezia::ErrorCode error);
 
@@ -68,11 +76,14 @@ signals:
 protected slots:
     void onBytesChanged(quint64 receivedBytes, quint64 sentBytes);
     void onConnectionStateChanged(Vpn::ConnectionState state);
+    void onAwgTunnelHealth(const AwgTunnelHealth& health);
 
 protected:
     QSharedPointer<VpnProtocol> m_vpnProtocol;
 
 private:
+    struct ManagedBackend;
+    std::shared_ptr<ManagedBackend> m_managedBackend;
     SecureServersRepository* m_serversRepository;
     SecureAppSettingsRepository* m_appSettingsRepository;
 

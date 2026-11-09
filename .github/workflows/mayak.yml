@@ -1,10 +1,19 @@
 name: 'Маяк: сборка приложения'
 
-# Сборки приложения Маяк VPN. Запускаются при изменениях в ветке mayak или вручную (Actions → Run workflow).
+# CI builds and tests on pull requests and the Mayak branch. Manual release mode
+# requires the real gateway public key and the permanent Android signing secrets.
 on:
+  pull_request:
+    branches: [ mayak ]
   push:
     branches: [ mayak ]
   workflow_dispatch:
+    inputs:
+      release:
+        description: 'Build release-ready signed artifacts (requires configured secrets)'
+        type: boolean
+        required: true
+        default: false
 
 env:
   QT_MIRROR: https://mirrors.ocf.berkeley.edu/qt/
@@ -33,15 +42,6 @@ jobs:
       uses: actions/checkout@v4
       with:
         submodules: 'true'
-
-    - name: 'Ключ шлюза Маяка'
-      shell: bash
-      run: |
-        if [ ! -s mayak/gateway_public.pem ]; then
-          curl -fsS --retry 3 "$MAYAK_KEY_URL" -o mayak/gateway_public.pem
-        fi
-        head -1 mayak/gateway_public.pem
-        grep -q "BEGIN PUBLIC KEY" mayak/gateway_public.pem
 
     - name: 'Qt для сборки'
       uses: jurplel/install-qt-action@v4.3.1
@@ -84,43 +84,151 @@ jobs:
         python-version: 3.14
     - run: pip install "conan==2.28.0"
 
-    # Подпись: постоянный ключ из секрета MAYAK_ANDROID_KEYSTORE_BASE64 (+ MAYAK_ANDROID_KEYSTORE_PASS).
-    # Без секрета — временный ключ: приложение ставится, но обновление поверх потребует переустановки.
+    # Smoke builds are unsigned. Release mode requires the permanent signing key;
+    # no temporary key is ever presented as a distributable Android release.
     - name: 'Ключ подписи'
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
       shell: bash
       env:
         KEYSTORE_BASE64: ${{ secrets.MAYAK_ANDROID_KEYSTORE_BASE64 }}
         KEYSTORE_PASS: ${{ secrets.MAYAK_ANDROID_KEYSTORE_PASS }}
       run: |
-        if [ -n "$KEYSTORE_BASE64" ]; then
-          echo "$KEYSTORE_BASE64" | base64 --decode > android.keystore
-          echo "QT_ANDROID_KEYSTORE_STORE_PASS=$KEYSTORE_PASS" >> $GITHUB_ENV
-          echo "Подпись постоянным ключом"
-        else
-          PASS=$(openssl rand -hex 16)
-          keytool -genkeypair -keystore android.keystore -alias mayak -keyalg RSA -keysize 2048 -validity 3650 \
-            -storepass "$PASS" -keypass "$PASS" -dname "CN=Mayak VPN test" >/dev/null
-          echo "::add-mask::$PASS"
-          echo "QT_ANDROID_KEYSTORE_STORE_PASS=$PASS" >> $GITHUB_ENV
-          echo "::warning::Временный ключ подписи: добавьте секрет MAYAK_ANDROID_KEYSTORE_BASE64, чтобы обновления ставились поверх"
-        fi
+        test -n "$KEYSTORE_BASE64" || { echo "Missing MAYAK_ANDROID_KEYSTORE_BASE64" >&2; exit 1; }
+        test -n "$KEYSTORE_PASS" || { echo "Missing MAYAK_ANDROID_KEYSTORE_PASS" >&2; exit 1; }
+        echo "$KEYSTORE_BASE64" | base64 --decode > android.keystore
+        echo "QT_ANDROID_KEYSTORE_STORE_PASS=$KEYSTORE_PASS" >> "$GITHUB_ENV"
         echo "QT_ANDROID_KEYSTORE_PATH=$GITHUB_WORKSPACE/android.keystore" >> $GITHUB_ENV
         echo "QT_ANDROID_KEYSTORE_ALIAS=mayak" >> $GITHUB_ENV
+
+    - name: 'Проверка ключа шлюза (release)'
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
+      shell: bash
+      run: |
+        curl -fsS --retry 3 "$MAYAK_KEY_URL" -o "$RUNNER_TEMP/mayak-gateway-public.pem"
+        grep -q '^-----BEGIN PUBLIC KEY-----' "$RUNNER_TEMP/mayak-gateway-public.pem"
+        echo "PROD_AGW_PUBLIC_KEY<<MAYAK_KEY_EOF" >> "$GITHUB_ENV"
+        cat "$RUNNER_TEMP/mayak-gateway-public.pem" >> "$GITHUB_ENV"
+        echo "MAYAK_KEY_EOF" >> "$GITHUB_ENV"
+
+    - name: 'Тестовый ключ шлюза (smoke only)'
+      if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.release) }}
+      shell: bash
+      run: |
+        openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$RUNNER_TEMP/mayak-smoke-private.pem" 2>/dev/null
+        openssl pkey -in "$RUNNER_TEMP/mayak-smoke-private.pem" -pubout -out "$RUNNER_TEMP/mayak-smoke-public.pem"
+        echo "PROD_AGW_PUBLIC_KEY<<MAYAK_KEY_EOF" >> "$GITHUB_ENV"
+        cat "$RUNNER_TEMP/mayak-smoke-public.pem" >> "$GITHUB_ENV"
+        echo "MAYAK_KEY_EOF" >> "$GITHUB_ENV"
 
     - name: 'Сборка'
       shell: bash
       env:
         QT_INSTALL_DIR: ${{ runner.temp }}
       run: |
-        deploy/build.sh -t android --sign --abi arm64-v8a
+        if [[ "${{ github.event_name == 'workflow_dispatch' && inputs.release }}" == "true" ]]; then
+          deploy/build.sh -t android --sign --abi arm64-v8a
+        else
+          deploy/build.sh -t android --abi arm64-v8a
+        fi
         VERSION=$(grep CMAKE_PROJECT_VERSION:STATIC deploy/build/CMakeCache.txt | cut -d= -f2)
         mkdir -p out
         cp deploy/build/client/android-build/*.apk "out/MayakVPN_${VERSION}_android_arm64.apk"
         ls -l out
 
     - name: 'APK'
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
       uses: actions/upload-artifact@v7
       with:
         name: mayak-android
         path: out/*.apk
         retention-days: 30
+
+    - name: 'Smoke APK (unsigned; not for installation)'
+      if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.release) }}
+      uses: actions/upload-artifact@v7
+      with:
+        name: mayak-android-smoke-unsigned
+        path: deploy/build/client/android-build/*.apk
+        retention-days: 7
+
+  Windows:
+    runs-on: windows-2022
+    timeout-minutes: 120
+    steps:
+    - name: 'Исходники'
+      uses: actions/checkout@v4
+      with:
+        submodules: 'true'
+
+    - uses: actions/setup-python@v6
+      with:
+        python-version: '3.13'
+
+    - name: 'Инструменты Qt, Ninja, Conan'
+      uses: jurplel/install-qt-action@v4.3.1
+      with:
+        version: '6.10.3'
+        host: 'windows'
+        target: 'desktop'
+        arch: 'win64_msvc2022_64'
+        modules: 'qtremoteobjects qt5compat qtimageformats qtshadertools qthttpserver qtwebsockets'
+        dir: '${{ runner.temp }}'
+        py7zrversion: '==0.22.*'
+
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        arch: x64
+
+    - name: 'UTF-8 console'
+      shell: pwsh
+      run: chcp 65001
+
+    - name: 'Conan'
+      shell: pwsh
+      run: |
+        python -m pip install "conan==2.28.0" ninja
+        conan profile detect --force
+
+    - name: 'Ключ шлюза для release build'
+      if: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
+      shell: pwsh
+      run: |
+        $key = Join-Path $env:RUNNER_TEMP 'mayak-gateway-public.pem'
+        Invoke-WebRequest -Uri $env:MAYAK_KEY_URL -OutFile $key -ErrorAction Stop
+        if (-not (Select-String -Path $key -Pattern '^-----BEGIN PUBLIC KEY-----' -Quiet)) { throw 'Gateway key is not a PEM public key' }
+        "PROD_AGW_PUBLIC_KEY<<MAYAK_KEY_EOF" >> $env:GITHUB_ENV
+        Get-Content -Raw $key >> $env:GITHUB_ENV
+        "MAYAK_KEY_EOF" >> $env:GITHUB_ENV
+
+    - name: 'Тестовый ключ шлюза (smoke only)'
+      if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.release) }}
+      shell: pwsh
+      run: |
+        openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$env:RUNNER_TEMP\mayak-smoke-private.pem" 2>$null
+        openssl pkey -in "$env:RUNNER_TEMP\mayak-smoke-private.pem" -pubout -out "$env:RUNNER_TEMP\mayak-smoke-public.pem"
+        $env:PROD_AGW_PUBLIC_KEY = Get-Content -Raw "$env:RUNNER_TEMP\mayak-smoke-public.pem"
+        "PROD_AGW_PUBLIC_KEY<<MAYAK_KEY_EOF" >> $env:GITHUB_ENV
+        Get-Content -Raw "$env:RUNNER_TEMP\mayak-smoke-public.pem" >> $env:GITHUB_ENV
+        "MAYAK_KEY_EOF" >> $env:GITHUB_ENV
+
+    - name: 'Сборка Windows smoke'
+      shell: pwsh
+      run: |
+        chcp 65001
+        $env:QT_ROOT = "$env:RUNNER_TEMP\Qt\6.10.3\msvc2022_64"
+        cmake -S . -B out/windows-mayak -G Ninja -DCMAKE_MAKE_PROGRAM=ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_TRY_COMPILE_CONFIGURATION=Release -DCMAKE_FIND_USE_PACKAGE_REGISTRY=OFF -DCMAKE_FIND_USE_SYSTEM_PACKAGE_REGISTRY=OFF -DAMNEZIA_BUILD_TESTS=ON -DCMAKE_PREFIX_PATH="$env:QT_ROOT"
+        cmake --build out/windows-mayak --config Release --parallel 4
+        cmake --build out/windows-mayak --config Release --target test_gateway_service_import --parallel 4
+        ctest --test-dir out/windows-mayak/client/tests -R "GatewayServiceImportTest|XraySerializationTest" --output-on-failure --timeout 180
+        ninja -C out/windows-mayak -t deps > out/windows-mayak/ninja-deps.txt
+        if ((Get-Item out/windows-mayak/ninja-deps.txt).Length -eq 0) { throw 'Ninja dependency database is empty' }
+
+    - name: 'Windows smoke artifacts (not for installation)'
+      uses: actions/upload-artifact@v7
+      with:
+        name: mayak-windows-smoke
+        path: |
+          out/windows-mayak/client/MayakVPN.exe
+          out/windows-mayak/service/server/MayakVPN-service.exe
+          out/windows-mayak/ninja-deps.txt
+        retention-days: 7

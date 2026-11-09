@@ -422,6 +422,10 @@ void CoreSignalHandlers::initPrepareConfigHandler()
             return;
         }
 
+        if (m_coreController->m_connectionController->isMayakManaged(serverId)) {
+            m_coreController->m_connectionUiController->openConnection();
+            return;
+        }
         const serverConfigUtils::ConfigType kind = m_coreController->m_serversRepository->serverKind(serverId);
 
         if (serverConfigUtils::isApiV2Subscription(kind) || serverConfigUtils::isLegacyApiSubscription(kind)) {
@@ -492,6 +496,14 @@ void CoreSignalHandlers::initAndroidConnectionHandler()
 {
 #ifdef Q_OS_ANDROID
     connect(AndroidController::instance(), &AndroidController::initConnectionState, this, [this](Vpn::ConnectionState state) {
+        const auto id = m_coreController->m_serversController->getDefaultServerId();
+        if (m_coreController->m_connectionController->isMayakManaged(id)) {
+            // A restored native service has no current proof. Reconcile its
+            // owned activation and obtain fresh admission before exposing Connected.
+            if (state == Vpn::ConnectionState::Connected)
+                m_coreController->m_connectionController->openConnection(id);
+            return;
+        }
         m_coreController->m_connectionUiController->onConnectionStateChanged(state);
         m_coreController->m_connectionController->restoreConnection();
     });
@@ -549,9 +561,7 @@ void CoreSignalHandlers::initNotificationHandler()
 
 void CoreSignalHandlers::initUpdateFoundHandler()
 {
-    connect(m_coreController->m_updateUiController, &UpdateUiController::updateFound, this, [this]() {
-        emit m_coreController->m_pageController->goToPage(PageLoader::PageEnum::PageUpdate);
-    });
+    // The QML MayakUpdatePrompt handles updateFound and navigates only after consent.
 }
 
 void CoreSignalHandlers::initLocalProxyHandler()

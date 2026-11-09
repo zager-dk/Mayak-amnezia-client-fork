@@ -18,6 +18,7 @@
 #include "vpnConnection.h"
 
 using namespace amnezia;
+class MayakAutoConnectRuntime;
 
 class ConnectionController : public QObject
 {
@@ -62,6 +63,11 @@ public:
     bool isServiceReady() const;
 
     bool isContainerSupported(DockerContainer container) const;
+    void setMayakRuntime(MayakAutoConnectRuntime* runtime);
+    bool isMayakManaged(const QString& serverId) const;
+    bool isMayakActive() const { return m_managedActive; }
+    QString managedMessage() const;
+    bool canInstallUpdate() const;
 
 signals:
     void connectionStateChanged(Vpn::ConnectionState state);
@@ -79,6 +85,9 @@ private:
     SecureServersRepository* m_serversRepository;
     SecureAppSettingsRepository* m_appSettingsRepository;
     VpnConnection* m_vpnConnection;
+    MayakAutoConnectRuntime* m_mayak = nullptr;
+    bool m_managedActive = false;
+    Vpn::ConnectionState m_effectiveState = Vpn::ConnectionState::Disconnected;
 };
 
 #endif

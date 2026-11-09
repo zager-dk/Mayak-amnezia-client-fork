@@ -10,6 +10,8 @@
 #include <winsock2.h>
 #include <ws2ipdef.h>
 
+#include <limits>
+
 #include <QFileInfo>
 
 #include "leakdetector.h"
@@ -52,6 +54,32 @@ QList<WireguardUtils::PeerStatus> WireguardUtilsWindows::getPeerStatus() {
   QString reply = m_tunnel.uapiCommand("get=1");
   PeerStatus status;
   QList<PeerStatus> peerList;
+  bool hasRxBytes = false, hasTxBytes = false;
+  bool hasSeconds = false, hasNanos = false, invalidNumbers = false;
+  qint64 seconds = 0, nanoseconds = 0;
+  // UAPI numeric fields are unsigned decimal text within our signed DTO range.
+  const auto parseNumber = [](const QString& text, qint64* result) {
+    if (text.isEmpty()) return false;
+    qint64 number = 0;
+    for (const QChar c : text) {
+      if (c < QLatin1Char('0') || c > QLatin1Char('9')) return false;
+      const int digit = c.unicode() - '0';
+      if (number > (std::numeric_limits<qint64>::max() - digit) / 10) return false;
+      number = number * 10 + digit;
+    }
+    *result = number;
+    return true;
+  };
+  const auto finishPeer = [&] {
+    if (status.m_pubkey.isEmpty()) return;
+    // Compute once, only after both independently validated components exist.
+    status.m_hasHandshake = !invalidNumbers && hasSeconds && hasNanos &&
+        nanoseconds < 1000000000 &&
+        seconds <= (std::numeric_limits<qint64>::max() - nanoseconds / 1000000) / 1000;
+    status.m_handshake = status.m_hasHandshake ? seconds * 1000 + nanoseconds / 1000000 : 0;
+    status.m_statsValid = !invalidNumbers && hasRxBytes && hasTxBytes && status.m_hasHandshake;
+    peerList.append(status);
+  };
   for (const QString& line : reply.split('\n')) {
     int eq = line.indexOf('=');
     if (eq <= 0) {
@@ -61,29 +89,24 @@ QList<WireguardUtils::PeerStatus> WireguardUtilsWindows::getPeerStatus() {
     QString value = line.mid(eq + 1);
 
     if (name == "public_key") {
-      if (!status.m_pubkey.isEmpty()) {
-        peerList.append(status);
-      }
+      finishPeer();
       QByteArray pubkey = QByteArray::fromHex(value.toUtf8());
       status = PeerStatus(pubkey.toBase64());
-    }
-
-    if (name == "tx_bytes") {
-      status.m_txBytes = value.toDouble();
-    }
-    if (name == "rx_bytes") {
-      status.m_rxBytes = value.toDouble();
-    }
-    if (name == "last_handshake_time_sec") {
-      status.m_handshake += value.toLongLong() * 1000;
-    }
-    if (name == "last_handshake_time_nsec") {
-      status.m_handshake += value.toLongLong() / 1000000;
+      hasRxBytes = hasTxBytes = hasSeconds = hasNanos = invalidNumbers = false;
+      seconds = nanoseconds = 0;
+    } else if (!status.m_pubkey.isEmpty()) {
+      // A duplicate or malformed field poisons this peer, regardless of order.
+      auto readNumber = [&](bool& seen, qint64& number) {
+        if (seen || !parseNumber(value, &number)) invalidNumbers = true;
+        seen = true;
+      };
+      if (name == "tx_bytes") readNumber(hasTxBytes, status.m_txBytes);
+      else if (name == "rx_bytes") readNumber(hasRxBytes, status.m_rxBytes);
+      else if (name == "last_handshake_time_sec") readNumber(hasSeconds, seconds);
+      else if (name == "last_handshake_time_nsec") readNumber(hasNanos, nanoseconds);
     }
   }
-  if (!status.m_pubkey.isEmpty()) {
-    peerList.append(status);
-  }
+  finishPeer();
 
   return peerList;
 }

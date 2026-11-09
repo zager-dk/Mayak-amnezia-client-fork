@@ -1,5 +1,4 @@
-sc stop AmneziaWGTunnel$AmneziaVPN
-sc delete AmneziaWGTunnel$AmneziaVPN
-taskkill /IM "AmneziaVPN-service.exe" /F
-taskkill /IM "AmneziaVPN.exe" /F
+@echo off
+rem Kept for compatibility with existing package layouts. Service lifecycle is
+rem managed by the Qt IFW lifecycle helper before extraction and after install.
 exit /b 0

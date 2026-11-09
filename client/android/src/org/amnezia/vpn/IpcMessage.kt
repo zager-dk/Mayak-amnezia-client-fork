@@ -23,7 +23,9 @@ enum class ServiceEvent : IpcMessage {
     STATUS_CHANGED,
     STATUS,
     STATISTICS_UPDATE,
-    ERROR
+    ERROR,
+    AWG_HEALTH_UPDATE,
+    MANAGED_RESULT
 }
 
 enum class Action : IpcMessage {
@@ -33,7 +35,9 @@ enum class Action : IpcMessage {
     DISCONNECT,
     REQUEST_STATUS,
     NOTIFICATION_PERMISSION_GRANTED,
-    SET_SAVE_LOGS
+    SET_SAVE_LOGS,
+    MANAGED_STOP,
+    MANAGED_INSPECT
 }
 
 fun <T> T.packToMessage(): Message

@@ -111,10 +111,30 @@ void DaemonLocalServerConnection::parseCommand(const QByteArray& data) {
       return;
     }
 
-    if (!Daemon::instance()->activate(config)) {
+    if (!Daemon::instance()->activateWithHealthContext(config, obj.value("healthContextId").toString())) {
       logger.error() << "Failed to activate the interface";
       emit disconnected();
     }
+    return;
+  }
+
+  if (type == "managedDeactivate") {
+    const QString request = obj.value("stopRequestId").toString();
+    const QString context = obj.value("healthContextId").toString();
+    if (request.size() != 64 || context.isEmpty()) return;
+    const bool stopped = Daemon::instance()->managedDeactivate(context);
+    write(QJsonObject{{"type", "managedStopped"}, {"owner", "MayakVpnAwgLifecycleV1"},
+        {"stopRequestId", request}, {"healthContextId", context}, {"stopped", stopped}});
+    return;
+  }
+  if (type == "managedInspect") {
+    const QString request = obj.value("inspectRequestId").toString();
+    if (request.size() != 64) return;
+    auto result = Daemon::instance()->managedInspection();
+    result.insert("type", "managedInspection");
+    result.insert("owner", "MayakVpnAwgLifecycleV1");
+    result.insert("inspectRequestId", request);
+    write(result);
     return;
   }
 
@@ -124,9 +144,10 @@ void DaemonLocalServerConnection::parseCommand(const QByteArray& data) {
   }
 
   if (type == "status") {
-    QJsonObject obj = Daemon::instance()->getStatus();
-    obj.insert("type", "status");
-    write(obj);
+    QJsonObject status = Daemon::instance()->getStatus();
+    status.insert("type", "status");
+    status.insert("statusRequestId", obj.value("statusRequestId"));
+    write(status);
     return;
   }
 

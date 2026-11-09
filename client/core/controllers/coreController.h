@@ -32,6 +32,7 @@
 #include "ui/controllers/languageUiController.h"
 #include "ui/controllers/updateUiController.h"
 #include "ui/controllers/api/servicesCatalogUiController.h"
+#include "ui/controllers/mayakInviteUiController.h"
 #include "ui/controllers/networkReachabilityController.h"
 
 #include "core/controllers/serversController.h"
@@ -177,6 +178,8 @@ private:
     PageController* m_pageController;
     InstallUiController* m_installUiController;
     ImportUiController* m_importController;
+    GatewayMayakProvisioner* m_mayakProvisioner = nullptr;
+    MayakInviteUiController* m_mayakInviteUiController = nullptr;
     ImportController* m_importCoreController;
     ExportUiController* m_exportUiController;
     SettingsUiController* m_settingsUiController;

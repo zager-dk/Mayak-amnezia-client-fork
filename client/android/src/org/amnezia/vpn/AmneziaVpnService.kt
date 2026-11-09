@@ -34,13 +34,14 @@ import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import org.amnezia.vpn.protocol.BadConfigException
+import org.amnezia.vpn.protocol.Protocol
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTED
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTING
 import org.amnezia.vpn.protocol.ProtocolState.DISCONNECTED
@@ -49,6 +50,7 @@ import org.amnezia.vpn.protocol.ProtocolState.RECONNECTING
 import org.amnezia.vpn.protocol.ProtocolState.UNKNOWN
 import org.amnezia.vpn.protocol.VpnException
 import org.amnezia.vpn.protocol.VpnStartException
+import org.amnezia.vpn.protocol.wireguard.Wireguard
 import org.amnezia.vpn.protocol.putStatus
 import org.amnezia.vpn.util.LoadLibraryException
 import org.amnezia.vpn.util.Log
@@ -67,6 +69,10 @@ const val MSG_VPN_CONFIG = "VPN_CONFIG"
 const val MSG_ERROR = "ERROR"
 const val MSG_SAVE_LOGS = "SAVE_LOGS"
 const val MSG_CLIENT_NAME = "CLIENT_NAME"
+const val MSG_AWG_TUNNEL_HEALTH = "AWG_TUNNEL_HEALTH"
+const val MSG_MANAGED_RESULT = "MANAGED_RESULT"
+const val MSG_MANAGED_TICKET = "MANAGED_TICKET"
+const val MSG_HEALTH_CONTEXT_ID = "HEALTH_CONTEXT_ID"
 
 const val AFTER_PERMISSION_CHECK = "AFTER_PERMISSION_CHECK"
 private const val PREFS_CONFIG_KEY = "LAST_CONF"
@@ -74,6 +80,7 @@ private const val PREFS_SERVER_NAME = "LAST_SERVER_NAME"
 private const val PREFS_SERVER_INDEX = "LAST_SERVER_INDEX"
 // private const val STATISTICS_SENDING_TIMEOUT = 1000L
 private const val TRAFFIC_STATS_UPDATE_TIMEOUT = 1000L
+private const val STATUS_HEALTH_UPDATE_TIMEOUT = 1000L
 private const val DISCONNECT_TIMEOUT = 5000L
 private const val STOP_SERVICE_TIMEOUT = 5000L
 
@@ -84,7 +91,13 @@ open class AmneziaVpnService : VpnService() {
     private lateinit var connectionScope: CoroutineScope
     private var isServiceBound = false
     private var vpnProto: VpnProto? = null
-    private var protocolState = MutableStateFlow(UNKNOWN)
+    private class ConnectionSession(
+        val source: ManagedProtocolState<org.amnezia.vpn.protocol.ProtocolState>,
+        val protocol: Protocol?
+    )
+    @Volatile private var activeSession = ConnectionSession(ManagedProtocolState("", "", UNKNOWN), null)
+    private val protocolState get() = activeSession.source.state
+    private var protocolStateJob: Job? = null
     private var serverName: String? = null
     private var serverIndex: Int = -1
 
@@ -97,9 +110,14 @@ open class AmneziaVpnService : VpnService() {
     private val isUnknown
         get() = protocolState.value == UNKNOWN
 
+    private val managedStarts = ManagedActivationGate()
+    @Volatile private var activeControlIdentity = ""
+    @Volatile private var activeManagedTicket = ""
+    @Volatile private var managedRequired = false
     private var connectionJob: Job? = null
     private var disconnectionJob: Job? = null
     private var trafficStatsUpdateJob: Job? = null
+    private var awgHealthSendingJob: Job? = null
     // private var statisticsSendingJob: Job? = null
     private lateinit var networkState: NetworkState
     private lateinit var trafficStats: TrafficStats
@@ -112,25 +130,28 @@ open class AmneziaVpnService : VpnService() {
     private val isActivityConnected
         get() = clientMessengers.any { it.value.name == ACTIVITY_MESSENGER_NAME }
 
-    private val connectionExceptionHandler = CoroutineExceptionHandler { _, e ->
-        connectionJob?.cancel()
-        connectionJob = null
-        disconnectionJob?.cancel()
-        disconnectionJob = null
-        protocolState.value = DISCONNECTED
-        when (e) {
-            is IllegalArgumentException,
-            is VpnStartException,
-            is VpnException -> onError(e.message ?: e.toString())
+    private fun connectionExceptionHandler(session: ConnectionSession) = CoroutineExceptionHandler { _, e ->
+        mainScope.launch {
+            if (!session.source.isCurrent(activeSession.source)) return@launch
+            connectionJob?.cancel()
+            connectionJob = null
+            disconnectionJob?.cancel()
+            disconnectionJob = null
+            session.source.state.value = DISCONNECTED
+            when (e) {
+                is IllegalArgumentException,
+                is VpnStartException,
+                is VpnException -> onError(e.message ?: e.toString(), session)
 
-            is JSONException,
-            is BadConfigException -> onError("VPN config format error: ${e.message}")
+                is JSONException,
+                is BadConfigException -> onError("VPN config format error: ${e.message}", session)
 
-            is LoadLibraryException -> onError("${e.message}. Caused: ${e.cause?.message}")
+                is LoadLibraryException -> onError("${e.message}. Caused: ${e.cause?.message}", session)
 
-            is UnknownHostException -> onError("Unknown host")
+                is UnknownHostException -> onError("Unknown host", session)
 
-            else -> throw e
+                else -> throw e
+            }
         }
     }
 
@@ -162,6 +183,9 @@ open class AmneziaVpnService : VpnService() {
                     Action.DISCONNECT -> {
                         disconnect()
                     }
+
+                    Action.MANAGED_STOP -> managedStop(msg)
+                    Action.MANAGED_INSPECT -> managedInspect(msg)
 
                     Action.REQUEST_STATUS -> {
                         clientMessengers[msg.replyTo]?.let { clientMessenger ->
@@ -208,9 +232,9 @@ open class AmneziaVpnService : VpnService() {
         super.onCreate()
         Log.d(TAG, "Create Amnezia VPN service")
         mainScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
-        connectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO + connectionExceptionHandler)
+        connectionScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
         loadServerData()
-        launchProtocolStateHandler()
+        launchProtocolStateHandler(activeSession)
         networkState = NetworkState(this, ::reconnect)
         trafficStats = TrafficStats()
         registerBroadcastReceivers()
@@ -227,7 +251,13 @@ open class AmneziaVpnService : VpnService() {
             connect()
         } else {
             Log.d(TAG, "Start service")
-            connect(intent?.getStringExtra(MSG_VPN_CONFIG))
+            val config = intent?.getStringExtra(MSG_VPN_CONFIG)
+            if (config != null && parseConfigToJson(config)?.optString("managedTicket").orEmpty().isNotBlank()) {
+                // Start-service intents can be redelivered out of order. They
+                // cannot activate managed work: live Activity Messenger CONNECT
+                // is required, ordered on the same channel as stop/inspection.
+                pendingVpnConfig = config
+            } else connect(config)
         }
         ServiceCompat.startForeground(
             this, NOTIFICATION_ID,
@@ -266,8 +296,9 @@ open class AmneziaVpnService : VpnService() {
     override fun onRevoke() {
         Log.d(TAG, "onRevoke")
         // Calls to onRevoke() method may not happen on the main thread of the process
+        val revokedSession = activeSession
         mainScope.launch {
-            disconnect()
+            if (revokedSession.source.isCurrent(activeSession.source)) disconnect()
         }
     }
 
@@ -362,10 +393,13 @@ open class AmneziaVpnService : VpnService() {
     /**
      * Methods responsible for processing VPN connection
      */
-    private fun launchProtocolStateHandler() {
-        mainScope.launch {
+    private fun launchProtocolStateHandler(session: ConnectionSession) {
+        protocolStateJob?.cancel()
+        protocolStateJob = mainScope.launch {
             // drop first default UNKNOWN state
-            protocolState.drop(1).collect { protocolState ->
+            session.source.state.drop(1).collect { protocolState ->
+                if (!session.source.isCurrent(activeSession.source)) return@collect
+                val statusIdentity = session.source.identity
                 Log.d(TAG, "Protocol state changed: $protocolState")
 
                 serviceNotification.updateNotification(serverName, vpnProto?.label, protocolState)
@@ -373,10 +407,17 @@ open class AmneziaVpnService : VpnService() {
                 clientMessengers.send {
                     ServiceEvent.STATUS_CHANGED.packToMessage {
                         putStatus(protocolState)
+                        if (statusIdentity.ticket != null && statusIdentity.context != null) {
+                            putString(MSG_MANAGED_TICKET, statusIdentity.ticket)
+                            putString(MSG_HEALTH_CONTEXT_ID, statusIdentity.context)
+                        }
                     }
                 }
 
                 VpnStateStore.store { VpnState(protocolState, serverName, serverIndex, vpnProto) }
+
+                // DataStore may suspend while the next session is activated.
+                if (!session.source.isCurrent(activeSession.source)) return@collect
 
                 when (protocolState) {
                     CONNECTED -> {
@@ -388,6 +429,7 @@ open class AmneziaVpnService : VpnService() {
                     DISCONNECTED -> {
                         networkState.unbindNetworkListener()
                         stopTrafficStatsUpdateJob()
+                        stopAwgHealthSending()
                         // stopSendingStatistics()
                         if (!isServiceBound) stopService()
                     }
@@ -395,11 +437,13 @@ open class AmneziaVpnService : VpnService() {
                     DISCONNECTING -> {
                         networkState.unbindNetworkListener()
                         stopTrafficStatsUpdateJob()
+                        stopAwgHealthSending()
                         // stopSendingStatistics()
                     }
 
                     RECONNECTING -> {
                         stopTrafficStatsUpdateJob()
+                        stopAwgHealthSending()
                         // stopSendingStatistics()
                     }
 
@@ -481,11 +525,48 @@ open class AmneziaVpnService : VpnService() {
     }
 
     @MainThread
+    private fun launchAwgHealthSending(protocol: Wireguard) {
+        stopAwgHealthSending()
+        awgHealthSendingJob = mainScope.launch {
+            while (isActive && protocolState.value !in setOf(DISCONNECTED, DISCONNECTING, RECONNECTING, UNKNOWN)) {
+                protocol.tunnelHealth.value?.takeIf { health ->
+                    protocol === activeSession.protocol && protocol.isCurrentTunnelHealth(health)
+                }?.let { health ->
+                    clientMessengers.values
+                        .filter { it.name == ACTIVITY_MESSENGER_NAME }
+                        .forEach { messenger ->
+                            messenger.send {
+                                ServiceEvent.AWG_HEALTH_UPDATE.packToMessage {
+                                    putString(MSG_AWG_TUNNEL_HEALTH, health.toJsonString())
+                                }
+                            }
+                        }
+                }
+                delay(STATUS_HEALTH_UPDATE_TIMEOUT)
+            }
+        }
+    }
+
+    @MainThread
+    private fun stopAwgHealthSending() {
+        awgHealthSendingJob?.cancel()
+        awgHealthSendingJob = null
+    }
+
+    private var pendingVpnConfig: String? = null
+
+    @MainThread
     private fun connect(vpnConfig: String? = null) {
         if (vpnConfig == null) {
-            connectToVpn(Prefs.load(PREFS_CONFIG_KEY))
+            connectToVpn(pendingVpnConfig ?: Prefs.load(PREFS_CONFIG_KEY))
         } else {
-            Prefs.save(PREFS_CONFIG_KEY, vpnConfig)
+            val persisted = parseConfigToJson(vpnConfig)?.apply {
+                remove("healthContextId")
+                if (optString("managedTicket").isNotBlank()) put("managedRequired", true)
+                remove("managedTicket")
+            }?.toString().orEmpty()
+            Prefs.save(PREFS_CONFIG_KEY, persisted)
+            pendingVpnConfig = vpnConfig
             connectToVpn(vpnConfig)
         }
     }
@@ -512,72 +593,188 @@ open class AmneziaVpnService : VpnService() {
             return
         }
 
-        protocolState.value = CONNECTING
+        val managedTicket = config.optString("managedTicket")
+        managedRequired = config.optBoolean("managedRequired") || managedTicket.isNotBlank()
+        if (managedRequired && managedTicket.isBlank()) return // restored managed work has no live authority
+        val ticket = managedTicket.ifBlank { "legacy:" + java.util.UUID.randomUUID() }
+        val previousSession = activeSession
+        // Keep the old backend addressable until its stop has actually completed.
+        // Normal managed replacement reaches here only after its exact stop ACK.
+        if ((previousSession.protocol as? Wireguard)?.managedIsBackendOff() == false || connectionJob?.isActive == true) {
+            onError("Previous VPN session is not stopped", previousSession)
+            return
+        }
+        if (!managedStarts.begin(ticket)) return
+        val protocol = try {
+            if (managedTicket.isNotBlank()) vpnProto!!.newManagedProtocol() else vpnProto!!.protocol
+        } catch (e: IllegalArgumentException) {
+            onError(e.message.orEmpty())
+            return
+        }
+        activeManagedTicket = managedTicket
+        val controlIdentity = config.optString("healthContextId").ifBlank { java.util.UUID.randomUUID().toString() }
+        config.put("healthContextId", controlIdentity)
+        activeControlIdentity = controlIdentity
+        val session = ConnectionSession(ManagedProtocolState(managedTicket, controlIdentity, UNKNOWN), protocol)
+        activeSession = session
+        launchProtocolStateHandler(session)
+        session.source.state.value = CONNECTING
 
         if (!checkPermission()) {
             protocolState.value = DISCONNECTED
             return
         }
 
-        connectionJob = connectionScope.launch {
-            disconnectionJob?.join()
-            disconnectionJob = null
-
-            vpnProto?.protocol?.let { protocol ->
-                protocol.initialize(applicationContext, protocolState, ::onError)
-                protocol.startVpn(config, Builder(), ::protect)
-            }
+        pendingVpnConfig = null
+        val previousDisconnection = disconnectionJob
+        connectionJob = connectionScope.launch(connectionExceptionHandler(session)) {
+            previousDisconnection?.join()
+            if (!isActive || !session.source.isCurrent(activeSession.source) || !managedStarts.accepts(ticket)) return@launch
+            protocol.initialize(applicationContext, session.source.state) { error -> onError(error, session) }
+            if (!isActive || !session.source.isCurrent(activeSession.source) || !managedStarts.commit(ticket)) return@launch
+            protocol.startVpn(config, Builder(), ::protect)
+            (protocol as? Wireguard)?.let { awg -> mainScope.launch {
+                if (session.source.isCurrent(activeSession.source)) launchAwgHealthSending(awg)
+            } }
         }
     }
 
     @MainThread
     private fun disconnect() {
+        managedStarts.invalidateAll()
+        pendingVpnConfig = null
+        stopAwgHealthSending()
         if (isUnknown || isDisconnected || protocolState.value == DISCONNECTING) return
 
         Log.d(TAG, "Stop VPN connection")
 
         protocolState.value = DISCONNECTING
+        val session = activeSession
+        val connectionToCancel = connectionJob
+        disconnectionJob = connectionScope.launch(connectionExceptionHandler(session)) {
+            connectionToCancel?.cancelAndJoin()
+            if (connectionJob === connectionToCancel) connectionJob = null
 
-        disconnectionJob = connectionScope.launch {
-            connectionJob?.cancelAndJoin()
-            connectionJob = null
-
-            vpnProto?.protocol?.stopVpn()
+            session.protocol?.stopVpn()
 
             try {
                 withTimeout(DISCONNECT_TIMEOUT) {
                     // waiting for disconnect state
-                    protocolState.first { it == DISCONNECTED }
+                    session.source.state.first { it == DISCONNECTED }
                 }
             } catch (e: TimeoutCancellationException) {
                 Log.w(TAG, "Disconnect timeout")
-                stopService()
+                if (session.source.isCurrent(activeSession.source)) stopService()
             }
+        }
+    }
+
+    private fun sendManaged(msg: Message, result: JSONObject) {
+        result.put("owner", "MayakVpnAwgLifecycleV1")
+        msg.replyTo?.let { target -> IpcMessenger(target).send {
+            ServiceEvent.MANAGED_RESULT.packToMessage { putString(MSG_MANAGED_RESULT, result.toString()) }
+        } }
+    }
+
+    @MainThread
+    private fun managedStop(msg: Message) {
+        val request = msg.data.getString("stopRequestId").orEmpty()
+        val identity = msg.data.getString("healthContextId").orEmpty()
+        val ticket = msg.data.getString("managedTicket").orEmpty()
+        if (request.length != 64 || identity.isBlank()) return
+        if (identity != activeControlIdentity || (ticket != activeManagedTicket && ticket != "recovery:" + identity)) {
+            sendManaged(msg, JSONObject().put("type", "managedStopped").put("stopRequestId", request)
+                .put("healthContextId", identity).put("stopped", false))
+            return
+        }
+        managedStarts.invalidateAll()
+        pendingVpnConfig = null
+        connectionJob?.cancel()
+        stopAwgHealthSending()
+        val session = activeSession
+        val connectionToCancel = connectionJob
+        val previousDisconnection = disconnectionJob
+        mainScope.launch {
+            var stopped = false
+            try {
+                withTimeout(3000) {
+                    connectionToCancel?.cancelAndJoin()
+                    if (connectionJob === connectionToCancel) connectionJob = null
+                    previousDisconnection?.join()
+                    if (session.source.isCurrent(activeSession.source) && identity == activeControlIdentity) {
+                        stopped = (session.protocol as? Wireguard)?.managedStopAndConfirm() == true
+                        if (stopped) {
+                            // Preserve the event's source owner even after control authority is reset.
+                            session.source.state.value = DISCONNECTED
+                            activeControlIdentity = ""
+                            activeManagedTicket = ""
+                        }
+                    }
+                }
+            } catch (_: Exception) { stopped = false }
+            sendManaged(msg, JSONObject().put("type", "managedStopped").put("stopRequestId", request)
+                .put("healthContextId", identity).put("stopped", stopped))
+        }
+    }
+
+    @MainThread
+    private fun managedInspect(msg: Message) {
+        val request = msg.data.getString("inspectRequestId").orEmpty()
+        if (request.length != 64) return
+        managedStarts.invalidateAll()
+        pendingVpnConfig = null
+        connectionJob?.cancel()
+        val session = activeSession
+        val connectionToCancel = connectionJob
+        mainScope.launch {
+            var ownState = "unknown"
+            try {
+                withTimeout(3000) {
+                    connectionToCancel?.cancelAndJoin()
+                    if (connectionJob === connectionToCancel) connectionJob = null
+                    if (!session.source.isCurrent(activeSession.source)) return@withTimeout
+                    val protocol = session.protocol as? Wireguard
+                    ownState = if (protocol?.managedIsBackendOff() == true || (protocol == null && isUnknown)) "off"
+                        else if (activeControlIdentity.isNotBlank()) "active" else "unknown"
+                }
+            } catch (_: Exception) { }
+            sendManaged(msg, JSONObject().put("type", "managedInspection").put("inspectRequestId", request)
+                .put("state", ownState).put("controlIdentity", if (ownState == "active") activeControlIdentity else ""))
         }
     }
 
     @MainThread
     private fun reconnect() {
-        if (!isConnected) return
+        if (managedRequired || !isConnected) return
 
         Log.d(TAG, "Reconnect VPN")
 
         protocolState.value = RECONNECTING
-
-        connectionJob = connectionScope.launch {
-            vpnProto?.protocol?.reconnectVpn(Builder(), ::protect)
+        val session = activeSession
+        connectionJob = connectionScope.launch(connectionExceptionHandler(session)) {
+            session.protocol?.reconnectVpn(Builder(), ::protect)
+            (session.protocol as? Wireguard)?.let { protocol ->
+                mainScope.launch { if (session.source.isCurrent(activeSession.source)) launchAwgHealthSending(protocol) }
+            }
         }
     }
 
     /**
      * Utils methods
      */
-    private fun onError(msg: String) {
+    private fun onError(msg: String, session: ConnectionSession = activeSession) {
         Log.e(TAG, msg)
         mainScope.launch {
+            if (!session.source.isCurrent(activeSession.source)) return@launch
             clientMessengers.send {
                 ServiceEvent.ERROR.packToMessage {
                     putString(MSG_ERROR, msg)
+                    session.source.identity.let { identity ->
+                        if (identity.ticket != null && identity.context != null) {
+                            putString(MSG_MANAGED_TICKET, identity.ticket)
+                            putString(MSG_HEALTH_CONTEXT_ID, identity.context)
+                        }
+                    }
                 }
             }
         }

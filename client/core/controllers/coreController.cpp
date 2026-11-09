@@ -1,4 +1,5 @@
 #include "coreController.h"
+#include "mayakAutoConnectRuntime.h"
 
 #include <QCoreApplication>
 #include <QDirIterator>
@@ -172,7 +173,7 @@ void CoreController::initCoreControllers()
     m_subscriptionController = new SubscriptionController(m_serversRepository, m_appSettingsRepository);
     m_storePurchaseController = new StorePurchaseController(m_serversRepository, m_appSettingsRepository);
     m_newsController = new NewsController(m_appSettingsRepository, m_serversRepository);
-    m_updateController = new UpdateController(m_appSettingsRepository, this);
+    m_updateController = new UpdateController(m_appSettingsRepository, m_vpnConnection.get(), this);
     
     m_installController = new InstallController(m_serversRepository, m_appSettingsRepository, this);
     m_exportController = new ExportController(m_serversRepository, m_appSettingsRepository, this);
@@ -180,6 +181,17 @@ void CoreController::initCoreControllers()
     m_connectionController = new ConnectionController(m_serversRepository, m_appSettingsRepository, m_vpnConnection.get(), this);
     m_settingsController = new SettingsController(m_serversRepository, m_appSettingsRepository, this);
     m_localProxyController = new LocalProxyController(m_serversRepository, m_appSettingsRepository, m_subscriptionController, this);
+    auto* runtime = new MayakAutoConnectRuntime(m_settings, m_serversRepository, m_appSettingsRepository,
+        m_subscriptionController, m_connectionController, m_vpnConnection->managedBackendPort(), this);
+    m_connectionController->setMayakRuntime(runtime);
+    connect(m_appSettingsRepository, &SecureAppSettingsRepository::mayakSessionChanging, runtime, &MayakAutoConnectRuntime::cancel);
+    connect(m_serversRepository, &SecureServersRepository::serverRemoved, runtime, [runtime](const QString& id, int) {
+        if (runtime->manages(id)) runtime->cancel();
+    });
+    m_updateController->setTunnelDisconnectedProvider([connection=QPointer<ConnectionController>(m_connectionController)] {
+        return connection && connection->canInstallUpdate();
+    });
+    connect(qApp, &QCoreApplication::aboutToQuit, runtime, &MayakAutoConnectRuntime::shutdown);
 }
 
 void CoreController::initControllers()
@@ -203,6 +215,13 @@ void CoreController::initControllers()
 
     m_importController = new ImportUiController(m_importCoreController, this);
     setQmlContextProperty("ImportController", m_importController);
+
+    if (m_engine) {
+        m_mayakProvisioner = new GatewayMayakProvisioner(m_subscriptionController, m_serversController, this);
+        m_mayakInviteUiController = new MayakInviteUiController(m_appSettingsRepository, m_importController, m_serversController,
+                                                                m_mayakProvisioner, nullptr, {}, this);
+        setQmlContextProperty("MayakInviteController", m_mayakInviteUiController);
+    }
 
     m_exportUiController = new ExportUiController(m_exportController, this);
     setQmlContextProperty("ExportController", m_exportUiController);

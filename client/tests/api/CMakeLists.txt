@@ -25,8 +25,27 @@ target_link_libraries(test_gateway_service_import PRIVATE
     test_common
 )
 
+add_executable(test_update_controller
+    testUpdateController.cpp
+)
+
+add_executable(test_mayak_runtime testMayakRuntime.cpp)
+target_link_libraries(test_mayak_runtime PRIVATE Qt6::Test test_common)
+add_test(NAME MayakRuntimeTest COMMAND test_mayak_runtime)
+
+add_executable(test_mayak_permission_preflight testMayakPermissionPreflight.cpp)
+target_link_libraries(test_mayak_permission_preflight PRIVATE Qt6::Test test_common)
+add_test(NAME MayakPermissionPreflightTest COMMAND test_mayak_permission_preflight)
+
+target_link_libraries(test_update_controller PRIVATE
+    Qt6::Test
+    test_common
+)
+target_compile_definitions(test_update_controller PRIVATE MAYAK_SOURCE_DIR="${CMAKE_SOURCE_DIR}")
+
 add_test(NAME UiApiServicesModelAndControllerTest COMMAND test_ui_api_services_model_and_controller)
 add_test(NAME UiNewsModelAndControllerTest COMMAND test_ui_news_model_and_controller)
 add_test(NAME GatewayServiceImportTest COMMAND test_gateway_service_import)
+add_test(NAME UpdateControllerTest COMMAND test_update_controller)
 
 amnezia_copy_runtime_dlls()

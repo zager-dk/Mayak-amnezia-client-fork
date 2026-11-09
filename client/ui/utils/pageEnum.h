@@ -93,6 +93,7 @@ namespace PageLoader
         PageSettingsLanguage,
 
         PageUpdate,
+        PageMayakInvite,
     };
     Q_ENUM_NS(PageEnum)
 

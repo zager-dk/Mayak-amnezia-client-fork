@@ -13,6 +13,10 @@ WireguardProtocol::WireguardProtocol(const QJsonObject &configuration, QObject *
     : VpnProtocol(configuration, parent)
 {
     m_impl.reset(new LocalSocketController());
+    m_healthPollTimer.setInterval(1000);
+    connect(&m_healthPollTimer, &QTimer::timeout, m_impl.get(), &ControllerImpl::checkStatus);
+    connect(m_impl.get(), &ControllerImpl::awgTunnelHealthUpdated,
+            this, &WireguardProtocol::awgTunnelHealthUpdated);
     connect(m_impl.get(), &ControllerImpl::connected, this,
             [this](const QString &pubkey, const QDateTime &connectionTimestamp) {
                 setConnectionState(Vpn::ConnectionState::Connected);
@@ -39,17 +43,29 @@ WireguardProtocol::WireguardProtocol(const QJsonObject &configuration, QObject *
 
     connect(m_impl.get(), &ControllerImpl::disconnected, this,
             [this]() { setConnectionState(Vpn::ConnectionState::Disconnected); });
+    connect(m_impl.get(), &ControllerImpl::managedStopped, this, &WireguardProtocol::managedStopped);
+    connect(m_impl.get(), &ControllerImpl::managedInspected, this, &WireguardProtocol::managedInspected);
     m_impl->initialize(nullptr, nullptr);
 }
 
 WireguardProtocol::~WireguardProtocol()
 {
-    WireguardProtocol::stop();
-    QThread::msleep(200);
+    if (!m_managedLifecycle) { WireguardProtocol::stop(); QThread::msleep(200); }
+}
+
+void WireguardProtocol::managedDeactivate(const QString& request, const QString& context) {
+    m_managedLifecycle = true;
+    m_healthPollTimer.stop();
+    m_impl->managedDeactivate(request, context);
+}
+void WireguardProtocol::inspectOwnBackend(const QString& request) {
+    m_managedLifecycle = true;
+    m_impl->inspectOwnBackend(request);
 }
 
 void WireguardProtocol::stop()
 {
+    m_healthPollTimer.stop();
     if (guardStop()) {
         return;
     }
@@ -65,6 +81,7 @@ ErrorCode WireguardProtocol::startMzImpl()
     m_rawConfig[configKey::hostName] = NetworkUtilities::getIPAddress(m_rawConfig[configKey::hostName].toString());
 
     m_impl->activate(m_rawConfig);
+    m_healthPollTimer.start();
     return ErrorCode::NoError;
 }
 
@@ -78,5 +95,6 @@ ErrorCode WireguardProtocol::stopMzImpl()
 ErrorCode WireguardProtocol::start()
 {
     resetStopGuard();
+    m_healthPollTimer.stop();
     return startMzImpl();
 }

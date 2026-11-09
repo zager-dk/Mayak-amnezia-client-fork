@@ -497,6 +497,40 @@ QString SecureAppSettingsRepository::getInstallationUuid(bool createIfNotExists)
     return uuid;
 }
 
+QString SecureAppSettingsRepository::mayakSessionToken() const
+{
+    if (!m_settings->encryptedStorageAvailable() || !m_settings->isEncryptedValueStored(QStringLiteral("Mayak/sessionToken"))) {
+        return {};
+    }
+    return value(QStringLiteral("Mayak/sessionToken")).toString();
+}
+
+bool SecureAppSettingsRepository::setMayakSessionToken(const QString &token)
+{
+    if (!mayakSessionToken().isEmpty() && mayakSessionToken() != token) emit mayakSessionChanging();
+    const QString key = QStringLiteral("Mayak/sessionToken");
+    if (token.isEmpty()) {
+        return m_settings->removeAndSync(key);
+    }
+    if (!m_settings->encryptedStorageAvailable()) {
+        return false;
+    }
+    return m_settings->setEncryptedValueAndSync(key, token);
+}
+
+bool SecureAppSettingsRepository::isMayakManagedServer(const QString &id) const
+{
+    return !id.isEmpty() && value(QStringLiteral("Mayak/managedServers")).toStringList().contains(id);
+}
+
+bool SecureAppSettingsRepository::markMayakManagedServer(const QString &id)
+{
+    if (id.isEmpty()) return false;
+    auto ids = value(QStringLiteral("Mayak/managedServers")).toStringList();
+    if (!ids.contains(id)) ids.append(id);
+    return m_settings->setEncryptedValueAndSync(QStringLiteral("Mayak/managedServers"), ids);
+}
+
 QStringList SecureAppSettingsRepository::getReadNewsIds() const
 {
     return value("News/readIds").toStringList();

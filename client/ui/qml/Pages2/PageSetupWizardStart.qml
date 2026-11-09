@@ -24,7 +24,7 @@ PageType {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.topMargin: 16 + PageController.safeAreaTopMargin
-        anchors.bottomMargin: 96 + PageController.safeAreaBottomMargin
+        anchors.bottomMargin: 88 + PageController.safeAreaBottomMargin
 
         Image {
             anchors.centerIn: parent
@@ -46,12 +46,11 @@ PageType {
         anchors.bottom: parent.bottom
         anchors.leftMargin: 16
         anchors.rightMargin: 16
-        anchors.bottomMargin: 8 + PageController.safeAreaBottomMargin
+        anchors.bottomMargin: 16 + PageController.safeAreaBottomMargin
 
-        text: qsTr("Let's get started")
+        text: MayakInviteController.hasSession ? qsTr("Продолжить настройку доступа") : qsTr("Войти или создать аккаунт Маяка")
 
-        onClicked: {
-            PageController.goToPage(PageEnum.PageSetupWizardConfigSource)
-        }
+        onClicked: PageController.goToPage(PageEnum.PageMayakInvite)
     }
+
 }

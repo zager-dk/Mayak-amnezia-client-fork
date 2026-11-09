@@ -95,6 +95,10 @@ public:
     void setLogEnableDate(const QDateTime &date);
     
     QString getInstallationUuid(bool createIfNotExists) const;
+    QString mayakSessionToken() const;
+    bool setMayakSessionToken(const QString &token);
+    bool isMayakManagedServer(const QString &serverId) const;
+    bool markMayakManagedServer(const QString &serverId);
     QStringList getReadNewsIds() const;
     void setReadNewsIds(const QStringList &ids);
 
@@ -115,6 +119,7 @@ public:
     void setLocalProxyPortUserDefined(bool userDefined);
 
 signals:
+    void mayakSessionChanging();
     void appLanguageChanged(QLocale locale);
     void allowedDnsServersChanged(const QStringList &servers);
     void sitesChanged(RouteMode mode);

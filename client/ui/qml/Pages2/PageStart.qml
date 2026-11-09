@@ -156,7 +156,7 @@ PageType {
                 PageController.goToPageHome()
             } else {
                 PageController.goToStartPage()
-                PageController.goToPage(PageEnum.PageSettingsServersList)
+                PageController.goToPage(PageEnum.PageMayakInvite)
             }
             PageController.showNotificationMessage(finishedMessage)
         }
@@ -232,7 +232,7 @@ PageType {
                 PageController.goToPageHome()
             } else {
                 PageController.goToStartPage()
-                PageController.goToPage(PageEnum.PageSettingsServersList)
+                PageController.goToPage(PageEnum.PageMayakInvite)
             }
             PageController.showNotificationMessage(message)
         }
@@ -319,30 +319,6 @@ PageType {
         }
 
         TabBarButtonType {
-            id: shareTabButton
-
-            Connections {
-                target: ServersModel
-
-                function onModelReset() {
-                    if (!SettingsController.isOnTv()) {
-                        var hasServerWithWriteAccess = ServersUiController.hasServerWithWriteAccess()
-                        shareTabButton.visible = hasServerWithWriteAccess
-                    }
-                }
-            }
-
-            visible: !SettingsController.isOnTv() && ServersUiController.hasServerWithWriteAccess()
-
-            text: qsTr("Share")
-            icon.source: "qrc:/images/controls/share-2.svg"
-
-            onClicked: {
-                tabBarStackView.goToTabBarPage(PageEnum.PageShare)
-            }
-        }
-
-        TabBarButtonType {
             id: settingsTabButton
 
             text: qsTr("Settings")
@@ -354,15 +330,5 @@ PageType {
             }
         }
 
-        TabBarButtonType {
-            id: plusTabButton
-
-            text: qsTr("Add")
-            icon.source: "qrc:/images/controls/plus.svg"
-
-            onClicked: {
-                tabBarStackView.goToTabBarPage(PageEnum.PageSetupWizardConfigSource)
-            }
-        }
     }
 }

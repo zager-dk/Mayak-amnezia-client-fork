@@ -213,6 +213,18 @@ set(COMMON_FILES_CPP
     ${CLIENT_ROOT_DIR}/amneziaApplication.cpp
     ${CLIENT_ROOT_DIR}/secureQSettings.cpp
     ${CLIENT_ROOT_DIR}/vpnConnection.cpp
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakBackendBridge.h
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakBackendBridge.cpp
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakAutoConnectRuntime.h
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakAutoConnectRuntime.cpp
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakAutoConnectCoordinator.h
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakAutoConnectCoordinator.cpp
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakAttemptStore.h
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakAttemptStore.cpp
+    ${CLIENT_ROOT_DIR}/core/controllers/api/mayakAdmissionClient.h
+    ${CLIENT_ROOT_DIR}/core/controllers/api/mayakAdmissionClient.cpp
+    ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelProbe.h
+    ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelProbe.cpp
 )
 
 file(GLOB_RECURSE PAGE_LOGIC_H CONFIGURE_DEPENDS ${CLIENT_ROOT_DIR}/ui/pages_logic/*.h)

@@ -12,6 +12,8 @@ UpdateUiController::UpdateUiController(UpdateController* updateController, QObje
         connect(m_updateController, &UpdateController::updateCheckFailed, this, &UpdateUiController::updateCheckFailed);
         connect(m_updateController, &UpdateController::updateStateChanged, this, &UpdateUiController::updateStateChanged);
         connect(m_updateController, &UpdateController::updateCheckRunningChanged, this, &UpdateUiController::isCheckRunningChanged);
+        connect(m_updateController, &UpdateController::downloadProgressChanged, this, &UpdateUiController::downloadProgressChanged);
+        connect(m_updateController, &UpdateController::statusMessageChanged, this, &UpdateUiController::statusMessageChanged);
     }
 }
 
@@ -77,11 +79,29 @@ bool UpdateUiController::isCheckRunning() const
     return m_updateController ? m_updateController->isUpdateCheckRunning() : false;
 }
 
+int UpdateUiController::downloadProgress() const
+{
+    return m_updateController ? m_updateController->getDownloadProgress() : 0;
+}
+
+QString UpdateUiController::statusMessage() const
+{
+    return m_updateController ? m_updateController->getStatusMessage() : QString();
+}
+
+bool UpdateUiController::isUpdateSupported() const
+{
+    return m_updateController && m_updateController->isUpdateSupported();
+}
+
 void UpdateUiController::checkForUpdates()
 {
-    if (m_updateController) {
-        m_updateController->checkForUpdates();
-    }
+    if (!m_updateController || !m_updateController->isUpdateSupported()
+        || m_updateController->isUpdateCheckRunning()
+        || m_updateController->getUpdateState() == UpdateState::State::Downloading) return;
+
+    emit manualCheckStarted();
+    m_updateController->checkForUpdates();
 }
 
 void UpdateUiController::update()
@@ -102,5 +122,12 @@ void UpdateUiController::retry()
 {
     if (m_updateController) {
         m_updateController->startUpdate();
+    }
+}
+
+void UpdateUiController::cancel()
+{
+    if (m_updateController) {
+        m_updateController->cancelUpdate();
     }
 }

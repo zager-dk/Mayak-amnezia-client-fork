@@ -93,16 +93,22 @@ void ConnectionUiController::onConnectionStateChanged(Vpn::ConnectionState state
     case Vpn::ConnectionState::Error: {
         m_isConnectionInProgress = false;
         m_connectionStateText = tr("Connect");
-        emit connectionErrorOccurred(getLastConnectionError());
+        // Managed connections already provide a precise inline failure. The
+        // legacy lastError fallback is always API error1100 and is misleading.
+        if (m_connectionController->managedMessage().isEmpty())
+            emit connectionErrorOccurred(getLastConnectionError());
         break;
     }
     case Vpn::ConnectionState::Unknown: {
         m_isConnectionInProgress = false;
         m_connectionStateText = tr("Connect");
-        emit connectionErrorOccurred(getLastConnectionError());
+        if (m_connectionController->managedMessage().isEmpty())
+            emit connectionErrorOccurred(getLastConnectionError());
         break;
     }
     }
+    const auto managed = m_connectionController->managedMessage();
+    if (!managed.isEmpty()) m_connectionStateText = managed;
     emit connectionStateChanged();
 }
 
@@ -124,6 +130,7 @@ QString ConnectionUiController::connectionStateText() const
 void ConnectionUiController::toggleConnection()
 {
     if (m_state == Vpn::ConnectionState::Preparing) {
+        if (m_connectionController->isMayakActive()) { closeConnection(); return; }
         emit preparingConfig();
         return;
     }
@@ -138,6 +145,7 @@ void ConnectionUiController::toggleConnection()
             return;
         }
 
+        if (m_connectionController->isMayakManaged(serverId)) { openConnection(); return; }
         const ErrorCode errorCode = m_connectionController->isConnectionSupported(serverId);
         if (errorCode != ErrorCode::NoError) {
             notifyConnectionBlocked(errorCode);

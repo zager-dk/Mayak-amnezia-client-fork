@@ -1,4 +1,5 @@
 #include "connectionController.h"
+#include "mayakAutoConnectRuntime.h"
 
 #include <QJsonDocument>
 
@@ -28,7 +29,10 @@ ConnectionController::ConnectionController(SecureServersRepository* serversRepos
       m_appSettingsRepository(appSettingsRepository),
       m_vpnConnection(vpnConnection)
 {
-    connect(m_vpnConnection, &VpnConnection::connectionStateChanged, this, &ConnectionController::connectionStateChanged);
+    if (!m_vpnConnection) return; // Injectable configuration-only test facade.
+    connect(m_vpnConnection, &VpnConnection::connectionStateChanged, this, [this](Vpn::ConnectionState state) {
+        if (!m_managedActive) { m_effectiveState = state; emit connectionStateChanged(state); }
+    });
     connect(this, &ConnectionController::openConnectionRequested, m_vpnConnection, &VpnConnection::connectToVpn, Qt::QueuedConnection);
     connect(this, &ConnectionController::closeConnectionRequested, m_vpnConnection, &VpnConnection::disconnectFromVpn, Qt::QueuedConnection);
     connect(this, &ConnectionController::killSwitchModeChangedRequested, m_vpnConnection, &VpnConnection::onKillSwitchModeChanged, Qt::QueuedConnection);
@@ -39,12 +43,27 @@ ConnectionController::ConnectionController(SecureServersRepository* serversRepos
 
 bool ConnectionController::isConnected() const
 {
-    return m_vpnConnection && m_vpnConnection->connectionState() == Vpn::ConnectionState::Connected;
+    return m_effectiveState == Vpn::ConnectionState::Connected;
 }
 
 void ConnectionController::setConnectionState(Vpn::ConnectionState state)
 {
+    if (m_managedActive) return;
+    m_effectiveState = state;
     emit connectionStateChanged(state);
+}
+
+void ConnectionController::setMayakRuntime(MayakAutoConnectRuntime* runtime)
+{
+    m_mayak = runtime;
+    connect(runtime, &MayakAutoConnectRuntime::stateChanged, this, [this](Vpn::ConnectionState state, const QString&) {
+        m_managedActive = true; m_effectiveState = state; emit connectionStateChanged(state);
+    });
+}
+bool ConnectionController::isMayakManaged(const QString& id) const { return m_mayak && m_mayak->manages(id); }
+QString ConnectionController::managedMessage() const { return m_managedActive && m_mayak ? m_mayak->message() : QString(); }
+bool ConnectionController::canInstallUpdate() const {
+    return m_effectiveState == Vpn::ConnectionState::Disconnected && (!m_mayak || !m_mayak->busy());
 }
 
 ErrorCode ConnectionController::defaultContainerForServer(const QString &serverId, DockerContainer &container) const
@@ -208,6 +227,9 @@ ErrorCode ConnectionController::prepareConnection(const QString &serverId,
 
 ErrorCode ConnectionController::openConnection(const QString &serverId)
 {
+    if (isMayakManaged(serverId)) { m_managedActive = true; m_mayak->begin(serverId); return ErrorCode::NoError; }
+    if (m_mayak && m_mayak->busy()) return ErrorCode::InternalError;
+    m_managedActive = false;
     QJsonObject vpnConfiguration;
     DockerContainer container;
 
@@ -227,6 +249,7 @@ ErrorCode ConnectionController::openConnection(const QString &serverId)
 
 void ConnectionController::closeConnection()
 {
+    if (m_managedActive && m_mayak) { m_mayak->cancel(); return; }
     if (m_vpnConnection) {
         emit closeConnectionRequested();
     }
@@ -250,6 +273,7 @@ void ConnectionController::onKillSwitchModeChanged(bool enabled)
 
 ErrorCode ConnectionController::lastConnectionError() const
 {
+    if (m_managedActive) return ErrorCode::ApiConfigDownloadError;
     return m_vpnConnection->lastError();
 }
 

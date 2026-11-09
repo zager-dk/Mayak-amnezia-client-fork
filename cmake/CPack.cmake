@@ -1,14 +1,20 @@
 set(CPACK_PACKAGE_VENDOR            AmneziaVPN)
 set(CPACK_PACKAGE_VERSION           ${AMNEZIAVPN_VERSION})
 if(WIN32)
-    set(CPACK_PACKAGE_FILE_NAME "AmneziaVPN_${AMNEZIAVPN_VERSION}_windows_x64")
+    set(CPACK_PACKAGE_NAME "MayakVPN")
+    set(CPACK_PACKAGE_VENDOR "Mayak VPN")
+    set(CPACK_PACKAGE_FILE_NAME "MayakVPN_${AMNEZIAVPN_VERSION}_windows_x64")
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY "MayakVPN")
+    set(CPACK_PACKAGE_EXECUTABLES "MayakVPN" "Mayak VPN")
 elseif(APPLE AND NOT IOS AND NOT MACOS_NE)
     set(CPACK_PACKAGE_FILE_NAME "AmneziaVPN_${AMNEZIAVPN_VERSION}_macos_x64")
 elseif(LINUX AND NOT ANDROID)
     set(CPACK_PACKAGE_FILE_NAME "AmneziaVPN_${AMNEZIAVPN_VERSION}_linux_x64")
 endif()
-set(CPACK_PACKAGE_INSTALL_DIRECTORY AmneziaVPN)
-set(CPACK_PACKAGE_EXECUTABLES       AmneziaVPN AmneziaVPN)
+if(NOT WIN32)
+    set(CPACK_PACKAGE_INSTALL_DIRECTORY AmneziaVPN)
+    set(CPACK_PACKAGE_EXECUTABLES       AmneziaVPN AmneziaVPN)
+endif()
 set(CPACK_PRE_BUILD_SCRIPTS         ${CMAKE_CURRENT_LIST_DIR}/sign_binaries.cmake)
 set(CPACK_POST_BUILD_SCRIPTS        ${CMAKE_CURRENT_LIST_DIR}/sign_packages.cmake)
 set(CPACK_PROJECT_CONFIG_FILE       ${CMAKE_CURRENT_LIST_DIR}/CPackOptions.cmake)
@@ -23,8 +29,13 @@ else()
 endif()
 
 # === CPack IFW generator settings ===
-set(CPACK_IFW_PACKAGE_NAME                          AmneziaVPN)
-set(CPACK_IFW_PACKAGE_TITLE                         AmneziaVPN)
+if(WIN32)
+    set(CPACK_IFW_PACKAGE_NAME "MayakVPN")
+    set(CPACK_IFW_PACKAGE_TITLE "Mayak VPN")
+else()
+    set(CPACK_IFW_PACKAGE_NAME "AmneziaVPN")
+    set(CPACK_IFW_PACKAGE_TITLE "AmneziaVPN")
+endif()
 set(CPACK_IFW_PACKAGE_WIZARD_DEFAULT_WIDTH          600)
 set(CPACK_IFW_PACKAGE_WIZARD_DEFAULT_HEIGHT         380)
 set(CPACK_IFW_PACKAGE_WIZARD_STYLE                  Modern)
@@ -32,10 +43,18 @@ set(CPACK_IFW_PACKAGE_REMOVE_TARGET_DIR             ON)
 set(CPACK_IFW_PACKAGE_ALLOW_SPACE_IN_PATH           ON)
 set(CPACK_IFW_PACKAGE_ALLOW_NON_ASCII_CHARACTERS    ON)
 set(CPACK_IFW_PACKAGE_CONTROL_SCRIPT                ${CMAKE_SOURCE_DIR}/deploy/installer/qif/controlscript.js)
+if(WIN32)
+    # CLI dispatch does not load the interactive gate. Disable it in config.xml.
+    set(CPACK_IFW_PACKAGE_DISABLE_COMMAND_LINE_INTERFACE ON)
+endif()
 
 # === CPack WIX generator settings ===
 set(CPACK_WIX_VERSION               4)
-set(CPACK_WIX_UPGRADE_GUID          "{2D55AC62-96D6-4692-8C05-0D85BBF95485}")
+if(WIN32)
+    set(CPACK_WIX_UPGRADE_GUID "{7BE157F4-C3D0-4EB4-80B6-CCDD226EA9D2}")
+else()
+    set(CPACK_WIX_UPGRADE_GUID "{2D55AC62-96D6-4692-8C05-0D85BBF95485}")
+endif()
 set(CPACK_WIX_PRODUCT_ICON          ${CMAKE_SOURCE_DIR}/client/images/app.ico)
 set(CPACK_WIX_CUSTOM_XMLNS          "util=http://wixtoolset.org/schemas/v4/wxs/util")
 set(_AMNEZIA_WIX_PATCH_SERVICE      ${CMAKE_SOURCE_DIR}/deploy/installer/wix/service_install_patch.xml)
@@ -73,15 +92,37 @@ if(WIN32)
         COMPONENT AmneziaVPN
     )
 
-    set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
-    include(InstallRequiredSystemLibraries)
-    if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
-        install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
-            DESTINATION "."
-            COMPONENT AmneziaVPN
-        )
+    # CMake 3.30 does not recognize the MSVC 19.5 / VS 18 CRT layout and
+    # otherwise leaves the package without runtime DLLs. Stage the official
+    # redist DLLs from the active VS developer environment for that toolset.
+    if(MSVC_VERSION GREATER_EQUAL 1950)
+        if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+            set(_MAYAK_CRT_ARCH x64)
+        else()
+            set(_MAYAK_CRT_ARCH x86)
+        endif()
+        set(_MAYAK_CRT_DIR "$ENV{VCToolsRedistDir}/${_MAYAK_CRT_ARCH}/Microsoft.VC145.CRT")
+        file(TO_CMAKE_PATH "${_MAYAK_CRT_DIR}" _MAYAK_CRT_DIR)
+        if(EXISTS "${_MAYAK_CRT_DIR}")
+            file(GLOB _MAYAK_CRT_DLLS "${_MAYAK_CRT_DIR}/*.dll")
+            install(FILES ${_MAYAK_CRT_DLLS}
+                DESTINATION "."
+                COMPONENT AmneziaVPN
+            )
+        else()
+            message(WARNING "Mayak: MSVC 19.5 CRT redistributable directory was not found; installer packaging must not proceed")
+        endif()
     else()
-        message(WARNING "MSVC runtime libraries were not found, packages will not ship them")
+        set(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS_SKIP TRUE)
+        include(InstallRequiredSystemLibraries)
+        if(CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS)
+            install(PROGRAMS ${CMAKE_INSTALL_SYSTEM_RUNTIME_LIBS}
+                DESTINATION "."
+                COMPONENT AmneziaVPN
+            )
+        else()
+            message(WARNING "MSVC runtime libraries were not found, packages will not ship them")
+        endif()
     endif()
 endif()
 
@@ -99,6 +140,7 @@ cpack_ifw_configure_component(AmneziaVPN
     REQUIRES_ADMIN_RIGHTS
     FORCED_INSTALLATION
     SCRIPT ${CMAKE_SOURCE_DIR}/deploy/installer/qif/componentscript.js
+    ${_MAYAK_IFW_UI}
 )
 
 include(CPack)

@@ -8,6 +8,7 @@
 #include <QObject>
 #include <functional>
 #include <QDateTime>
+#include "core/utils/awgTunnelHealth.h"
 
 class Keys;
 class Device;
@@ -49,6 +50,14 @@ class ControllerImpl : public QObject {
   // active.
   virtual void checkStatus() = 0;
 
+  virtual AwgHealthContext expectedAwgHealthContext() const { return {}; }
+  virtual void managedDeactivate(const QString& request, const QString& context) {
+    emit managedStopped(request, context, false);
+  }
+  virtual void inspectOwnBackend(const QString& request) {
+    emit managedInspected(request, QStringLiteral("unknown"), QString());
+  }
+
   // This method is used to retrieve the logs from the backend service. Use
   // the callback to report logs when available.
   virtual void getBackendLogs(
@@ -75,6 +84,9 @@ class ControllerImpl : public QObject {
   void connected(const QString& pubkey,
                  const QDateTime& connectionTimestamp = QDateTime());
   void disconnected();
+  void awgTunnelHealthUpdated(const AwgTunnelHealth& health);
+  void managedStopped(const QString& request, const QString& context, bool stopped);
+  void managedInspected(const QString& request, const QString& state, const QString& identity);
 
   // This method should be emitted after a checkStatus() call.
   // "serverIpv4Gateway" is the current VPN tunnel gateway.

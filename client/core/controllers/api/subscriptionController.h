@@ -25,6 +25,14 @@ public:
         QString xrayUuid;
     };
 
+    struct GatewayConfigResult {
+        ErrorCode error = ErrorCode::InternalError;
+        QString serverId;
+        QString serviceProtocol;
+        ProtocolData protocolData;
+        QByteArray responseBody;
+    };
+
     struct CaptchaInfo {
         QString captchaId;
         QString captchaImageBase64;
@@ -46,6 +54,16 @@ public:
                                      const QString &serviceProtocol, const QString &email);
 
     ErrorCode fetchServiceConfig(const QString &serverId, const QString &serviceProtocol, QJsonObject &serverConfigJson);
+    QFuture<GatewayConfigResult> requestGatewayConfigAsync(const QString &serverId);
+    QFuture<GatewayConfigResult> requestMayakGatewayConfigAsync(const QString &serverId);
+    ErrorCode applyGatewayConfig(const GatewayConfigResult &result);
+
+    // Stable identity used by the native Mayak flow. AWG keys are kept in the existing
+    // per-subscription secure server model and reused across request retries.
+    ErrorCode getOrCreateMayakAwgProtocolData(const QString &serverId, ProtocolData *protocolData);
+    QString mayakInstallationUuid() const;
+    ErrorCode applyMayakAcquireConfig(const QString &serverId, const ProtocolData &protocolData,
+                                      const QString &encodedConfig, const QString &candidateHost, quint16 candidatePort);
 
     ErrorCode updateServiceFromGateway(const QString &serverId, const QString &newCountryCode, bool isConnectEvent,
                                        CaptchaInfo *captchaInfoOut = nullptr, ProtocolData *usedProtocolDataOut = nullptr);
@@ -106,7 +124,8 @@ private:
     ErrorCode extractServerConfigJsonFromResponse(const QByteArray &apiResponseBody, const QString &protocol,
                                                    const ProtocolData &protocolData, QJsonObject &serverConfigJson);
     ErrorCode applyUpdatedServiceConfig(const QString &serverId, const QString &serviceProtocol,
-                                        const ProtocolData &protocolData, const QByteArray &responseBody);
+                                        const ProtocolData &protocolData, const QByteArray &responseBody,
+                                        bool preserveCurrentSelection = false);
     ErrorCode applyImportedServiceConfig(const QString &userCountryCode, const QString &serviceType,
                                          const QString &serviceProtocol, const ProtocolData &protocolData,
                                          const QByteArray &responseBody);

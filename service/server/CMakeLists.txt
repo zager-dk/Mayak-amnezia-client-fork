@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.25.0 FATAL_ERROR)
 
-set(PROJECT AmneziaVPN-service)
+if(WIN32)
+    set(PROJECT MayakVPN-service)
+else()
+    set(PROJECT AmneziaVPN-service)
+endif()
 project(${PROJECT} VERSION ${AMNEZIAVPN_VERSION})
 
 if (APPLE)
@@ -124,7 +128,7 @@ set(RESOURCES)
 if(WIN32)
     configure_file(
         ${CMAKE_CURRENT_LIST_DIR}/amneziavpn-service.rc.in
-        ${CMAKE_CURRENT_BINARY_DIR}/amneziavpn-service.rc
+        ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT}.rc
     )
 
     set(HEADERS ${HEADERS}
@@ -168,7 +172,7 @@ if(WIN32)
     )
 
     set(RESOURCES ${RESOURCES}
-        ${CMAKE_CURRENT_BINARY_DIR}/amneziavpn-service.rc
+        ${CMAKE_CURRENT_BINARY_DIR}/${PROJECT}.rc
     )
 
     set(LIBS
@@ -290,6 +294,9 @@ include_directories(
 add_executable(${PROJECT} ${SOURCES} ${HEADERS} ${RESOURCES})
 target_link_libraries(${PROJECT} PRIVATE Qt6::Core Qt6::Widgets Qt6::Network Qt6::RemoteObjects Qt6::Core5Compat Qt6::DBus Qt6::Concurrent ${LIBS})
 target_compile_definitions(${PROJECT} PRIVATE "MZ_$<UPPER_CASE:${MZ_PLATFORM_NAME}>")
+if(WIN32)
+    target_compile_definitions(${PROJECT} PRIVATE CLIENT_KEYCHAIN_NAME_STR="${CLIENT_KEYCHAIN_NAME}")
+endif()
 
 find_package(amnezia-xray-bindings REQUIRED)
 target_link_libraries(${PROJECT} PRIVATE amnezia::xray-bindings)

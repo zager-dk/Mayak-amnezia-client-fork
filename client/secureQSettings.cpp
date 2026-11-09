@@ -1,6 +1,6 @@
 #include "secureQSettings.h"
 
-#include "core/utils/utilities.h"
+#include <QDebug>
 #include "cryptoUtils.h"
 #include <QDataStream>
 #include <QDebug>
@@ -15,8 +15,17 @@
 using namespace QKeychain;
 
 namespace {
-    constexpr const char *settingsKeyTag = "settingsKeyTag";
-    constexpr const char *settingsIvTag = "settingsIvTag";
+#ifdef Q_OS_WIN
+    // The pinned Windows QtKeychain backend uses job.key as the global
+    // Credential Manager target and ignores the service name. Keep these
+    // stable Mayak-only names; never probe the legacy Amnezia targets.
+    const QString settingsKeyTag = QStringLiteral("MayakVPN-Client/settingsKeyTag");
+    const QString settingsIvTag = QStringLiteral("MayakVPN-Client/settingsIvTag");
+#else
+    // Preserve existing credentials on Android, macOS and Linux.
+    const QString settingsKeyTag = QStringLiteral("settingsKeyTag");
+    const QString settingsIvTag = QStringLiteral("settingsIvTag");
+#endif
 #ifndef CLIENT_KEYCHAIN_NAME_STR
 #define CLIENT_KEYCHAIN_NAME_STR "AmneziaVPN-Keychain"
 #endif
@@ -24,19 +33,40 @@ namespace {
 }
 
 SecureQSettings::SecureQSettings(const QString &organization, const QString &application, QObject *parent, bool enableEncryption)
-    : QObject { parent }, m_settings(organization, application, parent), encryptedKeys({ "Servers/serversList", "Conf/favoriteLocations", "Conf/proxyUrls/agw_state" }), m_encryptionEnabled(enableEncryption)
+    : QObject { parent }, m_settings(organization, application, parent), encryptedKeys({ "Servers/serversList", "Conf/favoriteLocations", "Conf/proxyUrls/agw_state", "Mayak/sessionToken", "Mayak/pendingAttempts", "Mayak/managedServers" }), m_encryptionEnabled(enableEncryption)
 {
     bool encrypted = m_settings.value("Conf/encrypted").toBool();
 
     // convert settings to encrypted for if updated to >= 2.1.0
     if (encryptionRequired() && !encrypted) {
         for (const QString &key : m_settings.allKeys()) {
+            // This new ledger has no legacy plaintext migration: a plaintext value
+            // is untrusted cleanup authority and must remain detectable as corrupt.
+            if (key == QStringLiteral("Mayak/pendingAttempts")) {
+                continue;
+            }
             if (encryptedKeys.contains(key)) {
                 const QVariant &val = value(key);
                 setValue(key, val);
             }
         }
         m_settings.setValue("Conf/encrypted", true);
+    }
+
+    const QString sessionKey = QStringLiteral("Mayak/sessionToken");
+    const QVariant storedSession = m_settings.value(sessionKey);
+    if (storedSession.isValid()) {
+        if (!encryptionRequired()) {
+            m_settings.remove(sessionKey);
+            m_settings.sync();
+        } else if (storedSession.userType() != QMetaType::QByteArray || !storedSession.toByteArray().startsWith(magicString)) {
+            // Migrate the token written by earlier Mayak builds before it was added to the encrypted key set.
+            if (!setEncryptedValueAndSync(sessionKey, storedSession)) {
+                qCritical() << "SecureQSettings: failed to migrate Mayak session token to encrypted storage";
+                m_settings.remove(sessionKey);
+                m_settings.sync();
+            }
+        }
     }
 }
 
@@ -86,6 +116,19 @@ QVariant SecureQSettings::value(const QString &key, const QVariant &defaultValue
 
 void SecureQSettings::setValue(const QString &key, const QVariant &value)
 {
+    storeValue(key, value, false);
+}
+
+bool SecureQSettings::setEncryptedValueAndSync(const QString &key, const QVariant &value)
+{
+    if (!encryptedKeys.contains(key) || !encryptedStorageAvailable()) {
+        return false;
+    }
+    return storeValue(key, value, true);
+}
+
+bool SecureQSettings::storeValue(const QString &key, const QVariant &value, bool sync)
+{
     QMutexLocker locker(&m_mutex);
 
     if (encryptionRequired() && encryptedKeys.contains(key)) {
@@ -97,25 +140,72 @@ void SecureQSettings::setValue(const QString &key, const QVariant &value)
             }
 
             QByteArray encryptedValue = encryptText(decryptedValue);
+            if (encryptedValue.isEmpty() && !decryptedValue.isEmpty()) {
+                return false;
+            }
             m_settings.setValue(key, magicString + encryptedValue);
         } else {
             qCritical() << "SecureQSettings::setValue Encryption required, but key is empty";
-            return;
+            return false;
         }
 
     } else {
         m_settings.setValue(key, value);
     }
 
+    if (sync) {
+        m_settings.sync();
+        if (m_settings.status() != QSettings::NoError) {
+            return false;
+        }
+    }
     m_cache.insert(key, value);
+    return true;
 }
 
 void SecureQSettings::remove(const QString &key)
 {
     QMutexLocker locker(&m_mutex);
-
     m_settings.remove(key);
     m_cache.remove(key);
+}
+
+bool SecureQSettings::removeAndSync(const QString &key)
+{
+    QMutexLocker locker(&m_mutex);
+
+    m_settings.remove(key);
+    m_settings.sync();
+    if (m_settings.status() != QSettings::NoError) {
+        return false;
+    }
+    m_cache.remove(key);
+    return true;
+}
+
+bool SecureQSettings::encryptedStorageAvailable() const
+{
+    return encryptionRequired() && !getEncKey().isEmpty() && !getEncIv().isEmpty();
+}
+
+bool SecureQSettings::isEncryptedValueStored(const QString &key) const
+{
+    QMutexLocker locker(&m_mutex);
+    const QVariant stored = m_settings.value(key);
+    return stored.userType() == QMetaType::QByteArray && stored.toByteArray().startsWith(magicString);
+}
+
+SecureQSettings::StoredValueClass SecureQSettings::storedValueClass(const QString &key) const
+{
+    QMutexLocker locker(&m_mutex);
+    if (!m_settings.contains(key)) {
+        return StoredValueClass::Missing;
+    }
+    const QVariant stored = m_settings.value(key);
+    if (stored.userType() == QMetaType::QByteArray && stored.toByteArray().startsWith(magicString)) {
+        return StoredValueClass::Encrypted;
+    }
+    return StoredValueClass::UnencryptedOrInvalid;
 }
 
 QByteArray SecureQSettings::backupAppConfig() const

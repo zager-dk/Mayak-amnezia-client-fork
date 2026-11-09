@@ -1,12 +1,22 @@
 package org.amnezia.vpn.protocol.wireguard
 
 import android.net.VpnService.Builder
+import android.net.ConnectivityManager
+import android.net.LinkProperties
+import android.net.Network
+import android.net.NetworkCapabilities
+import java.net.InetAddress
+import java.net.Inet4Address
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.isActive
+import java.util.UUID
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import org.amnezia.awg.GoBackend
 import org.amnezia.vpn.protocol.Protocol
 import org.amnezia.vpn.protocol.ProtocolState.CONNECTED
@@ -24,37 +34,162 @@ import org.amnezia.vpn.util.optStringOrNull
 import org.json.JSONObject
 
 private const val TAG = "Wireguard"
+private const val STATUS_POLL_TIMEOUT_MS = 1_000L
+
+/** Own-peer UAPI snapshot. This reports tunnel telemetry, not internet reachability. */
+data class AwgTunnelHealth(
+    val generation: Long,
+    val healthContextId: String,
+    val peerPublicKey: String,
+    val endpoint: String,
+    val localAddress: String,
+    val interfaceName: String,
+    val latestHandshakeEpochMs: Long,
+    val rxTotal: Long,
+    val txTotal: Long,
+    val valid: Boolean
+) {
+    fun toJsonString(): String = JSONObject()
+        .put("generation", generation.toString())
+        .put("healthContextId", healthContextId)
+        .put("peerPublicKey", peerPublicKey)
+        .put("endpoint", endpoint)
+        .put("localAddress", localAddress)
+        .put("interfaceName", interfaceName)
+        .put("latestHandshakeEpochMs", latestHandshakeEpochMs.toString())
+        .put("rxTotal", rxTotal.toString())
+        .put("txTotal", txTotal.toString())
+        .put("valid", valid)
+        .toString()
+}
+
+internal data class AwgHealthActivation(
+    val handle: Int,
+    val generation: Long,
+    val contextId: String,
+    val peerPublicKey: String,
+    val endpoint: String
+)
+
+/** Linearizes stop/start against publication, including synchronous metadata lookup. */
+internal class AwgHealthPublicationGate {
+    private var active: AwgHealthActivation? = null
+
+    @Synchronized fun activate(activation: AwgHealthActivation) { active = activation }
+    @Synchronized fun invalidate() { active = null }
+    @Synchronized fun isCurrent(activation: AwgHealthActivation): Boolean = active == activation
+    @Synchronized fun accepts(health: AwgTunnelHealth): Boolean {
+        val activation = active ?: return false
+        return activation.contextId.isNotEmpty() && health.healthContextId == activation.contextId &&
+            health.generation == activation.generation &&
+            health.peerPublicKey.equals(activation.peerPublicKey, ignoreCase = true) &&
+            health.endpoint == activation.endpoint
+    }
+    @Synchronized fun publishIfCurrent(
+        activation: AwgHealthActivation,
+        mayPublish: () -> Boolean,
+        publish: () -> Unit
+    ): Boolean {
+        if (active != activation || !mayPublish()) return false
+        publish()
+        return true
+    }
+}
+
+internal data class AwgPeerStats(
+    val publicKey: String,
+    val endpoint: String?,
+    val handshakeEpochMs: Long?,
+    val rxBytes: Long?,
+    val txBytes: Long?
+) {
+    val hasConfirmedHandshake: Boolean
+        get() = handshakeEpochMs?.let { it > 0L } == true
+}
+
+internal fun parseAwgPeerStats(
+    response: String,
+    expectedPublicKey: String,
+    requireHandshake: Boolean
+): AwgPeerStats? {
+    var peer: MutableMap<String, String>? = null
+    val target = expectedPublicKey.lowercase()
+    for (line in response.lineSequence()) {
+        if (line.isBlank()) continue
+        val separator = line.indexOf('=')
+        if (separator <= 0) return null
+        val key = line.substring(0, separator)
+        val value = line.substring(separator + 1)
+        if (key == "public_key") {
+            if (peer != null && peer["public_key"] == target) break
+            peer = mutableMapOf("public_key" to value.lowercase())
+        } else if (peer != null) {
+            peer[key] = value
+        }
+    }
+
+    val ownPeer = peer?.takeIf { it["public_key"] == target } ?: return null
+    val handshakeSecondsText = ownPeer["last_handshake_time_sec"]
+    val handshakeNanosText = ownPeer["last_handshake_time_nsec"]
+    val handshakeSeconds = handshakeSecondsText?.toLongOrNull()
+    val handshakeNanos = handshakeNanosText?.toLongOrNull()
+    val handshakeEpochMs = if (handshakeSecondsText != null && handshakeNanosText != null &&
+        handshakeSeconds != null && handshakeNanos != null && handshakeSeconds >= 0L &&
+        handshakeNanos in 0L until 1_000_000_000L &&
+        handshakeSeconds <= (Long.MAX_VALUE - handshakeNanos / 1_000_000L) / 1000L) {
+        handshakeSeconds * 1000L + handshakeNanos / 1_000_000L
+    } else null
+    if (requireHandshake && handshakeEpochMs == null) return null
+    val rx = ownPeer["rx_bytes"]?.toLongOrNull()?.takeIf { it >= 0L } ?: return null
+    val tx = ownPeer["tx_bytes"]?.toLongOrNull()?.takeIf { it >= 0L } ?: return null
+    return AwgPeerStats(ownPeer["public_key"]!!, ownPeer["endpoint"], handshakeEpochMs, rx, tx)
+}
+
+internal fun matchVpnInterfaceMetadata(
+    configuredIpv4: InetAddress,
+    candidates: List<Pair<String, List<InetAddress>>>
+): Pair<String, String>? {
+    if (configuredIpv4 !is Inet4Address) return null
+    // Each candidate is one current VPN network; ambiguity cannot establish ownership.
+    val interfaceName = candidates.singleOrNull { (name, addresses) ->
+        name.isNotBlank() && addresses.any { it == configuredIpv4 }
+    }?.first ?: return null
+    return (configuredIpv4.hostAddress ?: return null) to interfaceName
+}
 
 open class Wireguard : Protocol() {
 
-    private var tunnelHandle: Int = -1
+    @Volatile private var tunnelHandle: Int = -1
     private var config: WireguardConfig? = null // save config for reconnect
     protected open val ifName: String = "amn0"
     private lateinit var scope: CoroutineScope
     private var statusJob: Job? = null
+    @Volatile private var backendGeneration: Long = 0L
+    private val healthPublication = AwgHealthPublicationGate()
+    private val mutableTunnelHealth = MutableStateFlow<AwgTunnelHealth?>(null)
+    val tunnelHealth = mutableTunnelHealth.asStateFlow()
 
     override val statistics: Statistics
         get() {
-            if (tunnelHandle == -1) return Statistics.EMPTY_STATISTICS
-            val config = GoBackend.awgGetConfig(tunnelHandle) ?: return Statistics.EMPTY_STATISTICS
+            val handle = tunnelHandle
+            val wgConfig = config
+            if (handle == -1 || wgConfig == null) return Statistics.EMPTY_STATISTICS
+            val response = runCatching { GoBackend.awgGetConfig(handle) }.getOrNull()
+                ?: return Statistics.EMPTY_STATISTICS
+            val peer = parseAwgPeerStats(response, wgConfig.publicKeyHex, requireHandshake = false)
+                ?: return Statistics.EMPTY_STATISTICS
+            val rx = peer.rxBytes ?: return Statistics.EMPTY_STATISTICS
+            val tx = peer.txBytes ?: return Statistics.EMPTY_STATISTICS
             return Statistics.build {
-                var optsCount = 0
-                config.splitToSequence("\n").forEach { line ->
-                    with(line) {
-                        when {
-                            startsWith("rx_bytes=") -> setRxBytes(substring(9).toLong()).also { ++optsCount }
-                            startsWith("tx_bytes=") -> setTxBytes(substring(9).toLong()).also { ++optsCount }
-                            else -> {}
-                        }
-                    }
-                    if (optsCount == 2) return@forEach
-                }
+                setRxBytes(rx)
+                setTxBytes(tx)
             }
         }
 
     override fun internalInit() {
         if (!isInitialized) loadSharedLibrary(context, "wg-go")
         if (this::scope.isInitialized) {
+            healthPublication.invalidate()
             scope.cancel()
         }
         scope = CoroutineScope(Dispatchers.IO)
@@ -62,8 +197,8 @@ open class Wireguard : Protocol() {
 
     override suspend fun startVpn(config: JSONObject, vpnBuilder: Builder, protect: (Int) -> Boolean) {
         val wireguardConfig = parseConfig(config)
-        start(wireguardConfig, vpnBuilder, protect)
         this.config = wireguardConfig
+        start(wireguardConfig, vpnBuilder, protect, healthContextId = config.optString("healthContextId").ifBlank { UUID.randomUUID().toString() })
     }
 
     protected open fun parseConfig(config: JSONObject): WireguardConfig {
@@ -158,12 +293,20 @@ open class Wireguard : Protocol() {
         config: WireguardConfig,
         vpnBuilder: Builder,
         protect: (Int) -> Boolean,
-        stopExistingVpn: Boolean = false
+        stopExistingVpn: Boolean = false,
+        healthContextId: String
     ) {
         if (!stopExistingVpn && tunnelHandle != -1) {
             Log.w(TAG, "Tunnel already up")
             return
         }
+
+        // Invalidate callbacks/samples from any prior handle before bringing up this one.
+        healthPublication.invalidate()
+        statusJob?.cancel()
+        statusJob = null
+        backendGeneration += 1
+        mutableTunnelHealth.value = null
 
         buildVpnInterface(config, vpnBuilder)
 
@@ -188,54 +331,107 @@ open class Wireguard : Protocol() {
             tunnelHandle = -1
             throw VpnStartException("Protect VPN interface: permission not granted or revoked")
         }
-        launchStatusJob()
+        val activation = AwgHealthActivation(tunnelHandle, backendGeneration, healthContextId,
+            config.publicKeyHex, config.endpoint.toString())
+        healthPublication.activate(activation)
+        launchStatusJob(config, activation)
     }
 
-    private fun launchStatusJob() {
+    fun isCurrentTunnelHealth(health: AwgTunnelHealth): Boolean = healthPublication.accepts(health)
+
+    private fun launchStatusJob(config: WireguardConfig, activation: AwgHealthActivation) {
         Log.d(TAG, "Launch status job")
+        val handle = activation.handle
+        val generation = activation.generation
+        val expectedPeer = activation.peerPublicKey
         statusJob = scope.launch {
-            while (true) {
-                val lastHandshake = getLastHandshake()
-                Log.v(TAG, "lastHandshake=$lastHandshake")
-                if (lastHandshake == 0L) {
-                    delay(1000)
-                    continue
+            val samplingContext = coroutineContext
+            while (samplingContext.isActive && healthPublication.isCurrent(activation)) {
+                val response = runCatching { GoBackend.awgGetConfig(handle) }.getOrNull()
+                val peer = response?.let { parseAwgPeerStats(it, expectedPeer, requireHandshake = true) }
+                if (tunnelHandle != handle || backendGeneration != generation) break
+                val handshakeEpochMs = peer?.handshakeEpochMs
+                val localVpnMetadata = findVpnInterfaceMetadata(config)
+                val localAddress = localVpnMetadata?.first.orEmpty()
+                val interfaceName = localVpnMetadata?.second.orEmpty()
+                val endpoint = peer?.endpoint?.takeIf { it.isNotBlank() }
+                    ?: config.endpoint.toString()
+                val valid = peer != null && handshakeEpochMs != null &&
+                    peer.rxBytes != null && peer.txBytes != null &&
+                    endpoint.isNotBlank() && localAddress.isNotBlank() && interfaceName.isNotBlank()
+                val health = if (valid) {
+                    AwgTunnelHealth(
+                        generation = generation,
+                        healthContextId = activation.contextId,
+                        peerPublicKey = peer!!.publicKey,
+                        endpoint = endpoint,
+                        localAddress = localAddress,
+                        interfaceName = interfaceName,
+                        latestHandshakeEpochMs = handshakeEpochMs!!,
+                        rxTotal = peer.rxBytes!!,
+                        txTotal = peer.txBytes!!,
+                        valid = true
+                    )
+                } else {
+                    AwgTunnelHealth(
+                        generation = generation,
+                        healthContextId = activation.contextId,
+                        peerPublicKey = expectedPeer,
+                        endpoint = endpoint,
+                        localAddress = localAddress,
+                        interfaceName = interfaceName,
+                        latestHandshakeEpochMs = 0L,
+                        rxTotal = 0L,
+                        txTotal = 0L,
+                        valid = false
+                    )
                 }
-                if (lastHandshake == -2L || lastHandshake > 0L) state.value = CONNECTED
-                else if (lastHandshake == -1L) state.value = DISCONNECTED
-                statusJob = null
-                break
+
+                // Recheck cancellation, handle, generation and opaque context AFTER metadata.
+                // invalidate() and this publication are serialized by the same monitor.
+                val published = healthPublication.publishIfCurrent(activation, {
+                    samplingContext.isActive && tunnelHandle == handle && backendGeneration == generation
+                }) {
+                    mutableTunnelHealth.value = health
+                    if (valid && peer?.hasConfirmedHandshake == true) state.value = CONNECTED
+                }
+                if (!published) break
+                delay(STATUS_POLL_TIMEOUT_MS)
             }
         }
     }
 
-    private fun getLastHandshake(): Long {
-        if (tunnelHandle == -1) {
-            Log.e(TAG, "Trying to get config of a non-existent tunnel")
-            return -1
+    private fun findVpnInterfaceMetadata(config: WireguardConfig): Pair<String, String>? {
+        val ipv4 = config.addresses.firstOrNull { it.isIpv4 }?.address ?: return null
+        val connectivity = context.getSystemService(ConnectivityManager::class.java) ?: return null
+        val candidates = connectivity.allNetworks.mapNotNull { network: Network ->
+            val capabilities = connectivity.getNetworkCapabilities(network) ?: return@mapNotNull null
+            if (!capabilities.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) return@mapNotNull null
+            val properties: LinkProperties = connectivity.getLinkProperties(network) ?: return@mapNotNull null
+            properties.interfaceName?.let { name -> name to properties.linkAddresses.map { it.address } }
         }
-        val config = GoBackend.awgGetConfig(tunnelHandle)
-        if (config == null) {
-            Log.e(TAG, "Failed to get tunnel config")
-            return -2
-        }
-        val lastHandshake = config.lines().find { it.startsWith("last_handshake_time_sec=") }?.substring(24)?.toLong()
-        if (lastHandshake == null) {
-            Log.e(TAG, "Failed to get last_handshake_time_sec")
-            return -2
-        }
-        return lastHandshake
+        return matchVpnInterfaceMetadata(ipv4, candidates)
     }
 
     private fun turnOffVpn() {
+        healthPublication.invalidate()
         statusJob?.cancel()
         statusJob = null
+        backendGeneration += 1
+        mutableTunnelHealth.value = null
         val handleToClose = tunnelHandle
-        tunnelHandle = -1
         GoBackend.awgTurnOff(handleToClose)
+        tunnelHandle = -1
     }
 
+    fun managedIsBackendOff(): Boolean = tunnelHandle == -1
+    fun managedStopAndConfirm(): Boolean = try {
+        stopVpn()
+        tunnelHandle == -1
+    } catch (_: Exception) { false }
+
     override fun stopVpn() {
+        healthPublication.invalidate()
         if (tunnelHandle == -1) {
             Log.w(TAG, "Tunnel already down")
             return
@@ -246,6 +442,7 @@ open class Wireguard : Protocol() {
 
     override fun reconnectVpn(vpnBuilder: Builder, protect: (Int) -> Boolean) {
         val config = this.config ?: throw VpnException("Reconnect config is empty")
-        start(config, vpnBuilder, protect, true)
+        // Autonomous backend restart cannot reuse a prior Qt-owned proof context.
+        start(config, vpnBuilder, protect, true, healthContextId = UUID.randomUUID().toString())
     }
 }

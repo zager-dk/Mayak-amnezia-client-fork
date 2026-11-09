@@ -8,7 +8,17 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QThread>
+#include <QHostInfo>
+#include <QHostAddress>
+#include <QAbstractSocket>
+#include <QDeadlineTimer>
+#include <QElapsedTimer>
+#include <QTimer>
 #include <QUrl>
+#include <thread>
+#include <mutex>
+#include <condition_variable>
+#include <chrono>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include "core/repositories/secureAppSettingsRepository.h"
@@ -83,9 +93,11 @@ GatewayController::GatewayController(const QString &gatewayEndpoint, const bool 
                                      QObject *parent)
     : QObject(parent),
       m_gatewayEndpoint(gatewayEndpoint),
+      m_requestTimeoutMsecs(requestTimeoutMsecs),
       m_isStrictKillSwitchEnabled(isStrictKillSwitchEnabled),
       m_appSettingsRepository(appSettingsRepository)
 {
+    m_requestDeadline = QDeadlineTimer(qMax(0, m_requestTimeoutMsecs), Qt::PreciseTimer);
     // Маяк: ключ нашего шлюза вшит при сборке (mayak/mayak.cmake → mayak_build.h).
     const QByteArray publicKey = isDevEnvironment ? QByteArray(DEV_AGW_PUBLIC_KEY) : QByteArray(MAYAK_AGW_PUBLIC_KEY);
     m_publicKeyMissing = publicKey.isEmpty();
@@ -148,16 +160,42 @@ amnezia::ErrorCode GatewayController::post(const QString &endpoint, const QJsonO
 
 QFuture<QPair<amnezia::ErrorCode, QByteArray>> GatewayController::postAsync(const QString &endpoint, const QJsonObject apiPayload)
 {
-    prepareRequest();
+    prepareRequest(m_requestTimeoutMsecs);
     return QtConcurrent::run(
             [this, endpoint, apiPayload]() -> QPair<amnezia::ErrorCode, QByteArray> { return executePost(endpoint, apiPayload); });
 }
 
+QFuture<GatewayPostResult> GatewayController::postAuthenticatedAsync(const QString &endpoint, const QJsonObject apiPayload)
+{
+#ifdef Q_OS_IOS
+    // Preserve the platform permission prompt's owning-thread requirement; this
+    // path is a fixed 10 ms legacy allowance, while desktop DNS/IPC stays async.
+    IosController::Instance()->requestInetAccess();
+    QThread::msleep(10);
+#endif
+    // DNS lookup and strict kill-switch IPC can block. Keep both off the caller/UI
+    // thread; the gateway owner is retained by MayakAdmissionClient until completion.
+    return QtConcurrent::run([this, endpoint, apiPayload]() {
+        const QDeadlineTimer deadline = m_requestDeadline;
+        const int remaining = static_cast<int>(deadline.remainingTime());
+        if (remaining <= 0 || !prepareRequest(remaining, &deadline))
+            return GatewayPostResult{amnezia::ErrorCode::ApiConfigTimeoutError, QByteArray(), false};
+        return executePostDetailed(endpoint, apiPayload, 0, &deadline);
+    });
+}
+
 QPair<amnezia::ErrorCode, QByteArray> GatewayController::executePost(const QString &endpoint, const QJsonObject &apiPayload)
 {
+    const GatewayPostResult result = executePostDetailed(endpoint, apiPayload);
+    return qMakePair(result.error, result.body);
+}
+
+GatewayPostResult GatewayController::executePostDetailed(const QString &endpoint, const QJsonObject &apiPayload,
+                                                          const int timeoutOverrideMsecs, const QDeadlineTimer *totalDeadline)
+{
     if (m_client == 0) {
-        return qMakePair(m_publicKeyMissing ? amnezia::ErrorCode::ApiMissingAgwPublicKey : amnezia::ErrorCode::ApiConfigDownloadError,
-                         QByteArray());
+        return {m_publicKeyMissing ? amnezia::ErrorCode::ApiMissingAgwPublicKey : amnezia::ErrorCode::ApiConfigDownloadError,
+                QByteArray(), false};
     }
 
     QString path = endpoint;
@@ -169,8 +207,36 @@ QPair<amnezia::ErrorCode, QByteArray> GatewayController::executePost(const QStri
 
     const QByteArray payload = QJsonDocument(apiPayload).toJson(QJsonDocument::Compact);
     const QByteArray optionsJson = QJsonDocument(options).toJson(QJsonDocument::Compact);
+    const QByteArray pathBytes = path.toUtf8();
 
-    agw_result result = agw_post(m_client, path.toUtf8().constData(), payload.constData(), optionsJson.constData(), 0);
+    // Serialization/preparation can consume the final budget too. Check at the
+    // transport boundary and pass only the same absolute deadline's remainder.
+    const int transportTimeout = totalDeadline ? static_cast<int>(totalDeadline->remainingTime()) : timeoutOverrideMsecs;
+    if (totalDeadline && transportTimeout <= 0)
+        return {amnezia::ErrorCode::ApiConfigTimeoutError, QByteArray(), false};
+    // libagw's fifth argument is a cancellation HANDLE, never a millisecond value.
+    // A separate timer enforces the remaining total budget without guessing a handle.
+    const agw_cancel_handle cancel = transportTimeout > 0 ? agw_cancel_create() : 0;
+    if (transportTimeout > 0 && cancel == 0)
+        return {amnezia::ErrorCode::ApiConfigDownloadError, QByteArray(), false};
+    std::mutex cancelMutex;
+    std::condition_variable cancelWake;
+    bool completed = false;
+    std::thread deadlineThread;
+    if (cancel != 0) {
+        deadlineThread = std::thread([&] {
+            std::unique_lock<std::mutex> lock(cancelMutex);
+            if (!cancelWake.wait_for(lock, std::chrono::milliseconds(transportTimeout), [&] { return completed; }))
+                agw_cancel_cancel(cancel);
+        });
+    }
+    agw_result result = agw_post(m_client, pathBytes.constData(), payload.constData(), optionsJson.constData(), cancel);
+    if (cancel != 0) {
+        { std::lock_guard<std::mutex> lock(cancelMutex); completed = true; }
+        cancelWake.notify_one();
+        deadlineThread.join();
+        agw_cancel_destroy(cancel);
+    }
 
     QByteArray responseBody;
     if (result.body != nullptr) {
@@ -186,7 +252,7 @@ QPair<amnezia::ErrorCode, QByteArray> GatewayController::executePost(const QStri
     logAgwTrace(path, code, trace);
     persistState();
 
-    return qMakePair(mapResultCode(code, responseBody), responseBody);
+    return {mapResultCode(code, responseBody), responseBody, code == AGW_OK};
 }
 
 amnezia::ErrorCode GatewayController::mapResultCode(const int code, const QByteArray &responseBody)
@@ -202,33 +268,67 @@ amnezia::ErrorCode GatewayController::mapResultCode(const int code, const QByteA
     }
 }
 
-void GatewayController::prepareRequest()
+bool GatewayController::prepareRequest(const int maxPreparationMsecs, const QDeadlineTimer *totalDeadline)
 {
-#ifdef Q_OS_IOS
-    IosController::Instance()->requestInetAccess();
-    QThread::msleep(10);
-#endif
-
 #ifdef AMNEZIA_DESKTOP
     if (!m_isStrictKillSwitchEnabled) {
-        return;
+        return true;
     }
     QStringList ips;
+    const QDeadlineTimer deadline = totalDeadline ? *totalDeadline : QDeadlineTimer(maxPreparationMsecs);
     for (const QString &host : requestHosts()) {
-        const QString ip = NetworkUtilities::getIPAddress(host);
-        if (!ip.isEmpty()) {
-            ips.append(ip);
+        if (totalDeadline && deadline.hasExpired()) return false;
+        QHostAddress address(host);
+        if (address.protocol() != QAbstractSocket::UnknownNetworkLayerProtocol) {
+            ips.append(host);
+            continue;
         }
+        QEventLoop loop;
+        QString resolved;
+        const auto lookupId = QHostInfo::lookupHost(host, &loop, [&](const QHostInfo &info) {
+            if (!info.addresses().isEmpty()) resolved = info.addresses().first().toString();
+            loop.quit();
+        });
+        if (resolved.isEmpty()) {
+            const int remaining = qMax(0, static_cast<int>(deadline.remainingTime()));
+            if (remaining == 0) {
+                QHostInfo::abortHostLookup(lookupId);
+                return false;
+            }
+            QTimer timer;
+            timer.setSingleShot(true);
+            connect(&timer, &QTimer::timeout, &loop, &QEventLoop::quit);
+            timer.start(remaining);
+            loop.exec();
+        }
+        if (resolved.isEmpty() || deadline.hasExpired()) {
+            QHostInfo::abortHostLookup(lookupId);
+            return false;
+        }
+        ips.append(resolved);
     }
     if (ips.isEmpty()) {
-        return;
+        return false;
     }
-    IpcClient::withInterface([&](QSharedPointer<IpcInterfaceReplica> iface) {
+    bool allowed = false;
+    const auto allowRanges = [&](QSharedPointer<IpcInterfaceReplica> iface) {
+        // Source acquisition may have exhausted the budget. Never send a late command.
+        if (totalDeadline && deadline.hasExpired()) return;
         QRemoteObjectPendingReply<bool> reply = iface->addKillSwitchAllowedRange(ips);
-        if (!reply.waitForFinished(1000) || !reply.returnValue()) {
+        const int remaining = qMax(0, static_cast<int>(deadline.remainingTime()));
+        if (remaining == 0 || !reply.waitForFinished(totalDeadline ? remaining : qMin(1000, remaining)) || !reply.returnValue()) {
             qWarning() << "GatewayController::prepareRequest(): Failed to execute remote addKillSwitchAllowedRange call";
+        } else {
+            allowed = true;
         }
-    });
+    };
+    if (totalDeadline) IpcClient::withInterfaceUntil(deadline, allowRanges);
+    else IpcClient::withInterface(allowRanges);
+    return allowed && !deadline.hasExpired();
+#else
+    Q_UNUSED(maxPreparationMsecs);
+    Q_UNUSED(totalDeadline);
+    return true;
 #endif
 }
 

@@ -206,13 +206,21 @@ PageType {
                         variant: ButtonType.Text
                         size: ButtonType.Medium
                         loading: UpdateController.isCheckRunning
-                        enabled: !UpdateController.isCheckRunning
+                        enabled: UpdateController.isUpdateSupported && !UpdateController.isCheckRunning
 
                         text: UpdateController.isCheckRunning ? qsTr("Checking...") : qsTr("Check for updates")
 
                         onClicked: {
                             UpdateController.checkForUpdates()
                         }
+                    }
+
+                    BodyTextType {
+                        Layout.fillWidth: true
+                        visible: !UpdateController.isUpdateSupported
+                        horizontalAlignment: Text.AlignHCenter
+                        color: AmneziaStyle.color.textTertiary
+                        text: qsTr("Updates are not available for this device architecture.")
                     }
 
                     ButtonType {

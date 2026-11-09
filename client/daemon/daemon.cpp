@@ -1,3 +1,4 @@
+#include <QUuid>
 /* This Source Code Form is subject to the terms of the Mozilla Public
  * License, v. 2.0. If a copy of the MPL was not distributed with this
  * file, You can obtain one at http://mozilla.org/MPL/2.0/. */
@@ -53,7 +54,19 @@ Daemon* Daemon::instance() {
   return s_daemon;
 }
 
+bool Daemon::activateWithHealthContext(const InterfaceConfig& config, const QString& contextId) {
+  m_healthContextId.clear();
+  if (!activate(config)) return false;
+  m_healthContextId = contextId;
+  m_controlIdentity = contextId.isEmpty() ? QUuid::createUuid().toString(QUuid::WithoutBraces) : contextId;
+  m_teardownUncertain = false;
+  m_healthHopType = config.m_hopType;
+  ++m_healthGeneration;
+  return true;
+}
+
 bool Daemon::activate(const InterfaceConfig& config) {
+  m_healthContextId.clear();
   Q_ASSERT(wgutils() != nullptr);
 
   // There are 3 possible scenarios in which this method is called:
@@ -474,7 +487,22 @@ bool Daemon::parseConfig(const QJsonObject& obj, InterfaceConfig& config) {
   return true;
 }
 
+bool Daemon::managedDeactivate(const QString& identity) {
+  // Ownership test precedes any native mutation, including context invalidation.
+  if (identity.isEmpty() || identity != m_controlIdentity) return false;
+  return deactivate(false);
+}
+QJsonObject Daemon::managedInspection() {
+  QString state = QStringLiteral("unknown");
+  if (!m_controlIdentity.isEmpty()) state = QStringLiteral("active");
+  else if (!m_teardownUncertain && m_connections.isEmpty() && !wgutils()->interfaceExists()) state = QStringLiteral("off");
+  return QJsonObject{{"state", state}, {"controlIdentity", m_controlIdentity}};
+}
+
 bool Daemon::deactivate(bool emitSignals) {
+  m_healthContextId.clear();
+  m_teardownUncertain = true;
+  bool success = true;
   Q_ASSERT(wgutils() != nullptr);
 
   // Deactivate the main interface.
@@ -485,13 +513,10 @@ bool Daemon::deactivate(bool emitSignals) {
     }
   }
 
-  if (emitSignals) {
-    emit disconnected();
-  }
-
   // Cleanup DNS
   if (!dnsutils()->restoreResolvers()) {
     logger.warning() << "Failed to restore DNS resolvers.";
+    success = false;
   }
 
   // Cleanup peers and routing
@@ -499,21 +524,23 @@ bool Daemon::deactivate(bool emitSignals) {
     const InterfaceConfig& config = state.m_config;
     logger.debug() << "Deleting routes for" << config.m_hopType;
     for (const IPAddress& ip : config.m_allowedIPAddressRanges) {
-      wgutils()->deleteRoutePrefix(ip);
+      success = wgutils()->deleteRoutePrefix(ip) && success;
     }
-    wgutils()->deletePeer(config);
+    success = wgutils()->deletePeer(config) && success;
   }
 
   // Cleanup routing for excluded addresses.
   for (auto iterator = m_excludedAddrSet.constBegin();
        iterator != m_excludedAddrSet.constEnd(); ++iterator) {
-    wgutils()->deleteExclusionRoute(iterator.key());
+    success = wgutils()->deleteExclusionRoute(iterator.key()) && success;
   }
-  m_excludedAddrSet.clear();
-
-  m_connections.clear();
+  // Retain teardown inputs after partial failure for exact cleanup retry.
   // Delete the interface
-  return wgutils()->deleteInterface();
+  success = wgutils()->deleteInterface() && success;
+  m_teardownUncertain = !success;
+  if (success) { m_controlIdentity.clear(); m_excludedAddrSet.clear(); m_connections.clear(); }
+  if (emitSignals && success) emit disconnected();
+  return success;
 }
 
 QString Daemon::logs() {
@@ -587,19 +614,26 @@ QJsonObject Daemon::getStatus() {
   Q_ASSERT(wgutils() != nullptr);
   QJsonObject json;
   logger.debug() << "Status request";
+  json.insert("healthContextId", m_healthContextId);
+  json.insert("generation", QString::number(m_healthGeneration));
 
   if (!wgutils()->interfaceExists() || m_connections.isEmpty()) {
     json.insert("connected", QJsonValue(false));
+    json.insert("healthValid", QJsonValue(false));
     return json;
   }
 
-  const ConnectionState& connection = m_connections.first();
+  // The context belongs to the successfully activated hop, never another map entry.
+  const auto active = m_connections.constFind(m_healthHopType);
+  const ConnectionState& connection = !m_healthContextId.isEmpty() && active != m_connections.cend()
+      ? active.value() : m_connections.first();
+  if (active == m_connections.cend()) json.insert("healthContextId", QString());
   QList<WireguardUtils::PeerStatus> peers = wgutils()->getPeerStatus();
   for (const WireguardUtils::PeerStatus& status : peers) {
     if (status.m_pubkey != connection.m_config.m_serverPublicKey) {
       continue;
     }
-    json.insert("connected", QJsonValue(true));
+    json.insert("connected", QJsonValue(status.m_handshake > 0));
     json.insert("serverIpv4Gateway",
                 QJsonValue(connection.m_config.m_serverIpv4Gateway));
     json.insert("deviceIpv4Address",
@@ -607,10 +641,25 @@ QJsonObject Daemon::getStatus() {
     json.insert("date", connection.m_date.toString());
     json.insert("txBytes", QJsonValue(status.m_txBytes));
     json.insert("rxBytes", QJsonValue(status.m_rxBytes));
+    QString endpoint = connection.m_config.m_serverIpv4AddrIn;
+    if (endpoint.isEmpty()) endpoint = connection.m_config.m_serverIpv6AddrIn;
+    if (endpoint.contains(':') && !endpoint.startsWith('[')) endpoint = '[' + endpoint + ']';
+    endpoint += QStringLiteral(":") + QString::number(connection.m_config.m_serverPort);
+    json.insert("peerPublicKey", QString::fromLatin1(
+                    QByteArray::fromBase64(status.m_pubkey.toLatin1()).toHex()));
+    json.insert("endpoint", endpoint);
+    json.insert("localAddress", connection.m_config.m_deviceIpv4Address);
+    json.insert("interfaceName", wgutils()->interfaceName());
+    json.insert("latestHandshakeEpochMs", QString::number(status.m_handshake));
+    json.insert("rxTotal", QString::number(status.m_rxBytes));
+    json.insert("txTotal", QString::number(status.m_txBytes));
+    json.insert("healthValid", status.m_statsValid && status.m_handshake >= 0 &&
+                    !endpoint.isEmpty() && !connection.m_config.m_deviceIpv4Address.isEmpty());
     return json;
   }
 
   json.insert("connected", QJsonValue(false));
+  json.insert("healthValid", QJsonValue(false));
   return json;
 }
 

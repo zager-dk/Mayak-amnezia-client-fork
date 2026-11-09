@@ -20,6 +20,8 @@
 #include <QStandardPaths>
 #include <QStringList>
 #include <QTimer>
+#include <QUuid>
+#include <QPointer>
 
 #include "leakdetector.h"
 #include "logger.h"
@@ -72,7 +74,12 @@ void LocalSocketController::errorOccurred(
       return;
     }
 
+    const QPointer<LocalSocketController> owner(this);
+    const quint64 generation = m_healthGeneration;
+    const quint64 requestSerial = m_statusRequestSerial;
     emit initialized(false, false, QDateTime());
+    if (!owner || owner->m_healthGeneration != generation ||
+        owner->m_statusRequestSerial != requestSerial) return;
   }
 
   qCritical() << "ControllerError";
@@ -85,6 +92,11 @@ void LocalSocketController::disconnectInternal() {
   m_daemonState = eReady;
   m_initializingRetry = 0;
   m_initializingTimer.stop();
+  ++m_healthGeneration;
+  m_healthActive = false;
+  m_statusRequestPending = false;
+  m_pendingStatusId.clear();
+  m_expectedHealth = {};
   emit disconnected();
 }
 
@@ -104,7 +116,7 @@ void LocalSocketController::initializeInternal() {
   m_daemonState = eInitializing;
 
 #ifdef MZ_WINDOWS
-  QString path = "\\\\.\\pipe\\amneziavpn";
+  QString path = "\\\\.\\pipe\\MayakVpnAwgLifecycleV1";
 #else
   QString path = "/var/run/amneziavpn/daemon.socket";
   if (!QFileInfo::exists(path)) {
@@ -123,6 +135,13 @@ void LocalSocketController::daemonConnected() {
 }
 
 void LocalSocketController::activate(const QJsonObject &rawConfig) {
+  ++m_healthGeneration;
+  m_connectedGeneration = 0;
+  m_healthActive = true;
+  m_statusRequestPending = false;
+  m_pendingStatusId.clear();
+  m_expectedHealth = {};
+  m_expectedHealth.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
   QString protocolName = rawConfig.value("protocol").toString();
 
   int splitTunnelType = rawConfig.value("splitTunnelType").toInt();
@@ -133,9 +152,14 @@ void LocalSocketController::activate(const QJsonObject &rawConfig) {
   QJsonArray allowedDns = rawConfig.value(amnezia::configKey::allowedDnsServers).toArray();
 
   QJsonObject wgConfig = rawConfig.value(protocolName + "_config_data").toObject();
+  m_activePeerPublicKey = wgConfig.value(amnezia::configKey::serverPubKey).toString();
+  m_expectedHealth.peerPublicKey = QString::fromLatin1(QByteArray::fromBase64(m_activePeerPublicKey.toLatin1()).toHex());
+  m_expectedHealth.endpoint = AwgHealthContext::endpointForHost(
+      wgConfig.value(amnezia::configKey::hostName).toString(), wgConfig.value(amnezia::configKey::port).toInt());
 
   QJsonObject json;
   json.insert("type", "activate");
+  json.insert("healthContextId", m_expectedHealth.id);
   //  json.insert("hopindex", QJsonValue((double)hop.m_hopindex));
   json.insert("privateKey", wgConfig.value(amnezia::configKey::clientPrivKey));
   json.insert("deviceIpv4Address", wgConfig.value(amnezia::configKey::clientIp));
@@ -265,6 +289,13 @@ void LocalSocketController::activate(const QJsonObject &rawConfig) {
 }
 
 void LocalSocketController::deactivate() {
+  ++m_healthGeneration;
+  m_connectedGeneration = 0;
+  m_healthActive = false;
+  m_activePeerPublicKey.clear();
+  m_expectedHealth = {};
+  m_statusRequestPending = false;
+  m_pendingStatusId.clear();
   logger.debug() << "Deactivating";
 
   if (m_daemonState != eReady) {
@@ -279,14 +310,41 @@ void LocalSocketController::deactivate() {
   emit disconnected();
 }
 
+void LocalSocketController::flushManagedRequests() {
+  for (auto it = m_managedStops.cbegin(); it != m_managedStops.cend(); ++it)
+    write(QJsonObject{{"type", "managedDeactivate"}, {"stopRequestId", it.key()}, {"healthContextId", it.value()}});
+  for (const auto& request : m_managedInspections)
+    write(QJsonObject{{"type", "managedInspect"}, {"inspectRequestId", request}});
+}
+void LocalSocketController::managedDeactivate(const QString& request, const QString& context) {
+  // Do not synthesize disconnected and do not discard transport/context here.
+  if (request.size() != 64 || context.isEmpty() || m_managedStops.contains(request)) return;
+  m_managedStops.insert(request, context);
+  if (m_daemonState != eReady) return; // unknown, caller's bounded timer settles
+  QJsonObject json{{"type", "managedDeactivate"}, {"stopRequestId", request}, {"healthContextId", context}};
+  write(json);
+}
+void LocalSocketController::inspectOwnBackend(const QString& request) {
+  if (request.size() != 64 || m_managedInspections.contains(request)) return;
+  m_managedInspections.insert(request);
+  if (m_daemonState != eReady) return;
+  write(QJsonObject{{"type", "managedInspect"}, {"inspectRequestId", request}});
+}
+
 void LocalSocketController::checkStatus() {
   logger.debug() << "Check status";
 
   if (m_daemonState == eReady || m_daemonState == eInitializing) {
     Q_ASSERT(m_socket);
+    if (m_statusRequestPending) return;
+    m_statusRequestPending = true;
+    m_pendingStatusGeneration = m_healthGeneration;
+    ++m_statusRequestSerial;
+    m_pendingStatusId = QUuid::createUuid().toString(QUuid::WithoutBraces);
 
     QJsonObject json;
     json.insert("type", "status");
+    json.insert("statusRequestId", m_pendingStatusId);
     write(json);
   }
 }
@@ -354,7 +412,13 @@ void LocalSocketController::readData() {
       continue;
     }
 
+    const QPointer<LocalSocketController> owner(this);
+    const quint64 generation = m_healthGeneration;
+    const quint64 requestSerial = m_statusRequestSerial;
     parseCommand(command);
+    // Direct signal receivers can delete or replace the controller while parsing.
+    if (!owner || owner->m_healthGeneration != generation ||
+        owner->m_statusRequestSerial != requestSerial) return;
   }
 }
 
@@ -375,40 +439,83 @@ void LocalSocketController::parseCommand(const QByteArray& command) {
 
   logger.debug() << "Parse command:" << type;
 
-  if (m_daemonState == eInitializing && type == "status") {
-    m_daemonState = eReady;
-
-    QJsonValue connected = obj.value("connected");
-    if (!connected.isBool()) {
-      logger.error() << "Invalid JSON for status - connected expected";
-      return;
+  if (type == "managedStopped") {
+    const QString request = obj.value("stopRequestId").toString();
+    const QString context = obj.value("healthContextId").toString();
+    if (obj.value("owner").toString() != "MayakVpnAwgLifecycleV1" ||
+        !obj.value("stopped").isBool() || !m_managedStops.contains(request) ||
+        m_managedStops.value(request) != context) return;
+    m_managedStops.remove(request);
+    const bool stopped = obj.value("stopped").toBool();
+    if (stopped && m_expectedHealth.id == context) {
+      ++m_healthGeneration;
+      m_healthActive = false;
+      m_expectedHealth = {};
+      m_statusRequestPending = false;
+      m_pendingStatusId.clear();
     }
-
-    QDateTime datetime;
-    if (connected.toBool()) {
-      QJsonValue date = obj.value("date");
-      if (!date.isString()) {
-        logger.error() << "Invalid JSON for status - date expected";
-        return;
-      }
-
-      datetime = QDateTime::fromString(date.toString());
-      if (!datetime.isValid()) {
-        logger.error() << "Invalid JSON for status - date is invalid";
-        return;
-      }
-    }
-
-    emit initialized(true, connected.toBool(), datetime);
+    emit managedStopped(request, context, stopped);
     return;
   }
-
-  if (m_daemonState != eReady) {
-    logger.error() << "Unexpected command";
+  if (type == "managedInspection") {
+    const QString request = obj.value("inspectRequestId").toString();
+    if (obj.value("owner").toString() != "MayakVpnAwgLifecycleV1" || !m_managedInspections.remove(request)) return;
+    const QString state = obj.value("state").toString();
+    const QString identity = obj.value("controlIdentity").toString();
+    if ((state != "active" && state != "off" && state != "unknown") || (state == "active" && identity.isEmpty())) {
+      emit managedInspected(request, QStringLiteral("unknown"), QString()); return;
+    }
+    emit managedInspected(request, state, identity);
     return;
   }
 
   if (type == "status") {
+    // A duplicate/old/unsolicited response must not consume a newer pending request.
+    if (!m_statusRequestPending || m_pendingStatusId.isEmpty() ||
+        obj.value("statusRequestId").toString() != m_pendingStatusId) return;
+    const quint64 requestGeneration = m_pendingStatusGeneration;
+    m_statusRequestPending = false;
+    m_pendingStatusId.clear();
+    if (requestGeneration != m_healthGeneration) return;
+    if (m_daemonState != eReady && m_daemonState != eInitializing) return;
+    if (!obj.value("connected").isBool()) return;
+
+    QJsonObject healthJson = obj;
+    healthJson.insert("valid", obj.value("healthValid").toBool());
+    const AwgTunnelHealth health = AwgTunnelHealth::fromJson(healthJson);
+    const bool current = m_healthActive && m_expectedHealth.matches(health);
+    const QPointer<LocalSocketController> owner(this);
+    const quint64 requestSerial = m_statusRequestSerial;
+    // Every outgoing signal invokes foreign code synchronously. Never resume an
+    // older dispatch after deletion, stop/restart, or a newer status request.
+    const auto canContinue = [owner, requestGeneration, requestSerial, &health] {
+      return owner && owner->m_healthGeneration == requestGeneration &&
+          owner->m_statusRequestSerial == requestSerial && owner->m_daemonState == eReady &&
+          owner->m_healthActive && owner->m_expectedHealth.matches(health);
+    };
+    // Initialization uses exactly the same identity gate as normal polling.
+    if (m_daemonState == eInitializing) {
+      m_daemonState = eReady;
+      flushManagedRequests();
+      const bool connected = current && health.hasConfirmedHandshake();
+      emit initialized(true, connected, connected
+          ? QDateTime::fromMSecsSinceEpoch(health.latestHandshakeEpochMs) : QDateTime());
+      if (!current || !canContinue()) return;
+      emit awgTunnelHealthUpdated(health);
+      if (!canContinue()) return;
+      if (connected) m_connectedGeneration = requestGeneration;
+      return;
+    }
+    if (current) {
+      emit awgTunnelHealthUpdated(health);
+      if (!canContinue()) return;
+      if (health.hasConfirmedHandshake() && m_connectedGeneration != requestGeneration) {
+        m_connectedGeneration = requestGeneration;
+        emit connected(m_activePeerPublicKey,
+                       QDateTime::fromMSecsSinceEpoch(health.latestHandshakeEpochMs));
+        if (!canContinue()) return;
+      }
+    }
 
     QJsonValue serverIpv4Gateway = obj.value("serverIpv4Gateway");
     if (!serverIpv4Gateway.isString()) {
@@ -437,10 +544,12 @@ void LocalSocketController::parseCommand(const QByteArray& command) {
     emit statusUpdated(serverIpv4Gateway.toString(),
                        deviceIpv4Address.toString(), txBytes.toDouble(),
                        rxBytes.toDouble());
+
     return;
   }
 
   if (type == "disconnected") {
+    if (!m_managedStops.isEmpty()) return; // legacy event is never a managed ACK
     disconnectInternal();
     return;
   }
@@ -452,6 +561,11 @@ void LocalSocketController::parseCommand(const QByteArray& command) {
       return;
     }
 
+    if (!m_healthActive || m_activePeerPublicKey.isEmpty() ||
+        pubkey.toString().compare(m_activePeerPublicKey, Qt::CaseInsensitive) != 0) {
+      return;
+    }
+
     logger.debug() << "Handshake completed with:"
                    << pubkey.toString();
 
@@ -459,7 +573,6 @@ void LocalSocketController::parseCommand(const QByteArray& command) {
 
     emit statusUpdated("", m_deviceIpv4, 0, 0);
 
-    emit connected(pubkey.toString());
     return;
   }
 

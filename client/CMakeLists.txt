@@ -87,6 +87,7 @@ qt6_add_resources(QRC ${QRC}
     ${CLIENT_QML_QRC_FILE}
     ${CMAKE_CURRENT_LIST_DIR}/server_scripts/serverScripts.qrc
     ${CLIENT_EXTRA_QRC}
+    ${CMAKE_SOURCE_DIR}/mayak/update_signing_key.qrc
 )
 
 # -- i18n begin

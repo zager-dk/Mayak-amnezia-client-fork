@@ -33,7 +33,12 @@ class Daemon : public QObject {
   static bool parseConfig(const QJsonObject& obj, InterfaceConfig& config);
 
   virtual bool activate(const InterfaceConfig& config);
+  // Only commit the supplied context after actual backend activation succeeds.
+  bool activateWithHealthContext(const InterfaceConfig& config, const QString& contextId);
+  QString activeHealthContextId() const { return m_healthContextId; }
   virtual bool deactivate(bool emitSignals = true);
+  bool managedDeactivate(const QString& controlIdentity);
+  QJsonObject managedInspection();
   virtual QJsonObject getStatus();
 
   // Callback before any Activating measure is done
@@ -88,6 +93,11 @@ class Daemon : public QObject {
   QMap<InterfaceConfig::HopType, ConnectionState> m_connections;
   QHash<IPAddress, int> m_excludedAddrSet;
   QTimer m_handshakeTimer;
+  QString m_healthContextId;
+  QString m_controlIdentity;
+  bool m_teardownUncertain = false;
+  quint64 m_healthGeneration = 0;
+  InterfaceConfig::HopType m_healthHopType = InterfaceConfig::SingleHop;
 };
 
 #endif  // DAEMON_H

@@ -28,6 +28,7 @@ public:
 
     QString addServer(const QString &serverId, const QJsonObject &serverJson, serverConfigUtils::ConfigType kind);
     void editServer(const QString &serverId, const QJsonObject &serverJson, serverConfigUtils::ConfigType kind);
+    bool editServerAndSync(const QString &serverId, const QJsonObject &serverJson, serverConfigUtils::ConfigType kind);
     void removeServer(const QString &serverId);
     serverConfigUtils::ConfigType serverKind(const QString &serverId) const;
 

@@ -14,12 +14,19 @@ class SecureQSettings : public QObject
     Q_OBJECT
 
 public:
+    enum class StoredValueClass { Missing, Encrypted, UnencryptedOrInvalid };
+
     explicit SecureQSettings(const QString &organization, const QString &application = QString(),
                              QObject *parent = nullptr, bool enableEncryption = true);
 
     QVariant value(const QString &key, const QVariant &defaultValue = QVariant()) const;
     void setValue(const QString &key, const QVariant &value);
+    bool setEncryptedValueAndSync(const QString &key, const QVariant &value);
     void remove(const QString &key);
+    bool removeAndSync(const QString &key);
+    bool encryptedStorageAvailable() const;
+    bool isEncryptedValueStored(const QString &key) const;
+    StoredValueClass storedValueClass(const QString &key) const;
 
     QByteArray backupAppConfig() const;
     bool restoreAppConfig(const QByteArray &json);
@@ -31,6 +38,7 @@ private:
     QByteArray decryptText(const QByteArray &ba) const;
 
     bool encryptionRequired() const;
+    bool storeValue(const QString &key, const QVariant &value, bool sync);
     bool isExcludedFromBackup(const QString &key) const;
 
     QByteArray getEncKey() const;
@@ -50,7 +58,7 @@ private:
     };
 
     QStringList m_fieldsExcludedFromBackup = {
-        "Conf/installationUuid", "Conf/proxyUrls/",
+        "Conf/installationUuid", "Conf/proxyUrls/", "Mayak/",
     };
 
     mutable QByteArray m_key;

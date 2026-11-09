@@ -56,11 +56,12 @@ PageType {
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
-                text: qsTr("Servers")
-                icon.source: "qrc:/images/controls/server.svg"
+                text: qsTr("Mayak account")
+                subtitle: MayakInviteController.hasSession ? qsTr("Signed in") : qsTr("Sign in or create an account")
+                icon.source: "qrc:/images/controls/mail.svg"
                 trailingIconSource: "qrc:/images/controls/chevron-right.svg"
 
-                onClicked: PageController.goToPage(PageEnum.PageSettingsServersList)
+                onClicked: PageController.goToPage(PageEnum.PageMayakInvite)
             }
 
             ListItemType {
