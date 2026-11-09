@@ -1,0 +1,37 @@
+{
+  "status": "UNMODIFIED_FONT_ASSETS_ACQUIRED",
+  "onestCommit": "4c1db3aec83c67dd223dd82a68c039cab30917a9",
+  "jetbrainsMonoCommit": "02bb50b082dad9ef8a0f33ac393839202b760223",
+  "files": [
+    {
+      "file": "Onest.ttf",
+      "url": "https://raw.githubusercontent.com/google/fonts/4c1db3aec83c67dd223dd82a68c039cab30917a9/ofl/onest/Onest%5Bwght%5D.ttf",
+      "bytes": 193056,
+      "sha256": "966c5c29b4755da84b6854d5c21dd4eaa2420225d0e9874de602de176d4a9f31",
+      "modified": false
+    },
+    {
+      "file": "Onest-OFL.txt",
+      "url": "https://raw.githubusercontent.com/google/fonts/4c1db3aec83c67dd223dd82a68c039cab30917a9/ofl/onest/OFL.txt",
+      "bytes": 4384,
+      "sha256": "071195d8806e226faeee60259c28ca67b458227af5195a73f5cfcab06e3003bc",
+      "modified": false
+    },
+    {
+      "file": "JetBrainsMono-Regular.ttf",
+      "url": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/02bb50b082dad9ef8a0f33ac393839202b760223/fonts/ttf/JetBrainsMono-Regular.ttf",
+      "bytes": 270224,
+      "sha256": "e6fd0d7e91550b3ed2b735d4312474362c4716edc4fc0577a0f61ed782d5aed1",
+      "modified": false
+    },
+    {
+      "file": "JetBrainsMono-OFL.txt",
+      "url": "https://raw.githubusercontent.com/JetBrains/JetBrainsMono/02bb50b082dad9ef8a0f33ac393839202b760223/OFL.txt",
+      "bytes": 4399,
+      "sha256": "30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad",
+      "modified": false
+    }
+  ],
+  "runtimeNetworkDependency": false,
+  "fontMetadataAndRendering": "NOT_VERIFIED: fontTools unavailable; actual Qt/browser rendering still required"
+}

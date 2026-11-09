@@ -67,6 +67,18 @@ SheetType {
         offerUpdate(version, manual)
     }
 
+    function clearUpdateOffer() {
+        manualCheckPending = false
+        pendingVersion = ""
+        pendingManual = false
+        offeredVersion = ""
+        versionText = ""
+        if (opened) {
+            actionHandled = true
+            close()
+        }
+    }
+
     function acceptUpdate() {
         actionHandled = true
         acceptingUpdate = true
@@ -155,7 +167,7 @@ SheetType {
             root.manualCheckPending = false
             root.offerUpdate(UpdateController.version, manual)
         }
-        function onUpdateNotFound() { root.manualCheckPending = false }
+        function onUpdateNotFound() { root.clearUpdateOffer() }
         function onUpdateCheckFailed() { root.manualCheckPending = false }
     }
 

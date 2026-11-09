@@ -23,7 +23,7 @@ Text {
     color: AmneziaStyle.color.textPrimary
     font.pixelSize: 18
     font.weight: 400
-    font.family: "PT Root UI VF"
+    font.family: AmneziaStyle.uiFontFamily
     font.letterSpacing: -0.4
     font.features: { "ss08": 1, "ss09": 1, "lnum": 1, "tnum": 1 }
 

@@ -62,6 +62,9 @@ void ConnectionController::setMayakRuntime(MayakAutoConnectRuntime* runtime)
 }
 bool ConnectionController::isMayakManaged(const QString& id) const { return m_mayak && m_mayak->manages(id); }
 QString ConnectionController::managedMessage() const { return m_managedActive && m_mayak ? m_mayak->message() : QString(); }
+QString ConnectionController::managedConnectionPhase() const {
+    return m_managedActive && m_mayak ? m_mayak->connectionPhase() : QStringLiteral("idle");
+}
 bool ConnectionController::managedCleanupPending() const { return m_managedActive && m_mayak && m_mayak->cleanupPending(); }
 void ConnectionController::retryManagedCleanup() { if (managedCleanupPending()) m_mayak->retryCleanup(); }
 bool ConnectionController::canInstallUpdate() const {

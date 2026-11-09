@@ -1,13 +1,15 @@
-MayakVPN 5.1.0.12 source candidate provenance
-Base: accepted 5.1.0.10 source ZIP SHA-256 d7dd5bd5947302dcb7d8462339515843eb8949c7019141c845a9c319093fb308
-Delta: exactly seven reviewed frozen source files: four from 5111 evidence and three from 5112 evidence. The 5112 lineage record reports 1903 matches, exactly seven expected changes, and no unexpected changes.
-Version override: AMNEZIAVPN_VERSION=5.1.0.12; Windows update versionCode=2191.
+MayakVPN 5.1.0.14 source candidate provenance
+Base: accepted local 5.1.0.13 source ZIP SHA-256 f05543047c67cff1f7ab5734a1778c9e8362378ad0f10fa1536e5d50346d5684
+Accepted 68-file visual baseline manifest SHA-256: 8522c8e8d557788c3b6586141a42a061f27a7eeec06a671804d5d9cf27c07b57
+Accepted source manifest SHA-256: d5b9b3efe70e4cdf11e43a0ed919bd1b36eb8d853b2c2322f083bc08eff9d06e
+Overlay: exactly the seven updater/UI source paths from client/core/controllers/updateController.cpp, client/core/controllers/updateController.h, client/tests/api/testUpdateController.cpp, client/ui/controllers/updateUiController.cpp, client/ui/controllers/updateUiController.h, client/ui/qml/Components/MayakUpdatePrompt.qml, docs/UPDATES.md; each exact current hash is required in the accepted manifest. No new files or mutable-tree scan.
+Build version override: AMNEZIAVPN_VERSION=5.1.0.14; Android versionCode=2194 (base 2191 + APP_ANDROID_VERSION_CODE_OFFSET=3).
 No Windows/Android binary was built or signed by this source archive preparation.
-Seven-file SHA-256 pins:
-  client/core/utils/mayakTunnelProbe.cpp: a6e811b6cd80f977246b3ad1e5b192d48bc04b8e20058d67fe4aa96b5d564066
-  client/core/utils/mayakTunnelProbe.h: d0d992ebbfce61d0f861c031a9d069dcdbddbe18b8c0492895e74b9e0996d956
-  client/platforms/windows/daemon/windowstunnelservice.cpp: 8cf9644370241c279c60b062998c43a03627893ec6392002e4a9f52cf46a6c97
-  client/tests/api/probeTls/localTlsProbeTests.cpp: 8749f0a628cf5c307e67539849c5b4364172948fc25ef1d54a1401517201216d
-  client/tests/api/probeTls/run-fixture.py: aa62456f6058335b0bcbbed38eb2bb12c3d6b44b99497f8b557aaffbe79b25c2
-  client/tests/windowsUapi/nativeApiFakes.h: 9c0e29ee3e6e982cc9b6367f2356387a203a5f82dc8eecb1ac9139554f010f71
-  client/tests/windowsUapi/testWindowsUapiTransaction.cpp: 8af72fb6c154f3d23c61029833639357f5dc02ccd5f94cb63912ac83d387813f
+Approved source path SHA-256 values:
+  client/core/controllers/updateController.cpp: ab3b30f8d08dbbf3ce80faf26704c55c6cdd6453b1acabf3796aade598f0a403
+  client/core/controllers/updateController.h: e55992feca8f489b50ab67dbbaa8f2d6bd6344f540144356accfa3dd45409d31
+  client/tests/api/testUpdateController.cpp: 436ccaa8d8ff138632e2cf1806ec16292b9b93d593545d4722a252436c53522f
+  client/ui/controllers/updateUiController.cpp: 10d1be8bf593cfa4e9c85efe31d54021e182daa09447bae4062bcd1a369b45b0
+  client/ui/controllers/updateUiController.h: eb98a3d329ed901a8394b37ac1c629cfbfd37b43f66621fee8b3da68fd91c874
+  client/ui/qml/Components/MayakUpdatePrompt.qml: 3514d6c0a155a9f4418f58016ec4fe75988ad0e9e111ae8f14b5691749be764b
+  docs/UPDATES.md: e5018fb85abcf01d8e0a9547dfadda5bd278818330a6e83c3ea9e15485c13f8d

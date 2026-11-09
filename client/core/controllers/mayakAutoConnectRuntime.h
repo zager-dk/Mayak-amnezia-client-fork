@@ -29,11 +29,12 @@ public:
     void shutdown();
     bool busy() const;
     QString message() const { return m_message; }
+    QString connectionPhase() const { return m_connectionPhase; }
 signals:
     void stateChanged(Vpn::ConnectionState state, const QString& message);
 private:
     struct Session;
-    void publish(Vpn::ConnectionState state, const QString& message);
+    void publish(Vpn::ConnectionState state, const QString& message, const QString& phase);
     SecureQSettings* m_settings;
     QPointer<SecureServersRepository> m_servers;
     QPointer<SecureAppSettingsRepository> m_app;
@@ -43,4 +44,5 @@ private:
     mayak::admission::Transport m_transport;
     std::shared_ptr<Session> m_session;
     QString m_message;
+    QString m_connectionPhase = QStringLiteral("idle");
 };

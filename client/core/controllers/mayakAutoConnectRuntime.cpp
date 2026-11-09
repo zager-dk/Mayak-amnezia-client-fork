@@ -163,7 +163,8 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         });
     }
     ac::Millis now() const override { return B::monotonicMillis(); }
-    void output(Vpn::ConnectionState state,QString text) { if (facade) facade->publish(state,text); }
+    QString phase = QStringLiteral("preparing");
+    void output(Vpn::ConnectionState state,QString text) { if (facade) facade->publish(state,text,phase); }
     bool identityCurrent() const {
         if (!facade || !servers || !app || !connection || cancelled || app->mayakSessionToken().isEmpty()) return false;
         const auto cfg=servers->apiV2Config(serverId);
@@ -172,10 +173,12 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             cfg->apiConfig.serviceProtocol==common.value("service_protocol").toString() &&
             cfg->apiConfig.userCountryCode==common.value("user_country_code").toString();
     }
-    void failure(QString text) { preparing=false; terminal=true; output(Vpn::ConnectionState::Error,std::move(text)); }
+    void failure(QString text) { preparing=false; terminal=true; phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,std::move(text)); }
     void beginCoordinatorAfterPreflight() {
         if (cancelled || !identityCurrent()) {
-            preparing=false; terminal=true; output(Vpn::ConnectionState::Disconnected,{}); return;
+            preparing=false; terminal=true;
+            phase=cancelled ? QStringLiteral("cancelled") : QStringLiteral("idle");
+            output(Vpn::ConnectionState::Disconnected,{}); return;
         }
         coordinator=std::make_unique<ac::Coordinator>(*this,*this,[weak=weak_from_this()](const ac::Status& s) {
             if(auto self=weak.lock()) self->state(s);
@@ -261,6 +264,19 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         preparePermissionsAndBeginCoordinator();
     }
     void state(const ac::Status& s) {
+        // Copy the typed coordinator state on its owning thread. Consumers see
+        // only this immutable value, never the coordinator or its session.
+        switch(s.state) {
+        case ac::State::Idle: phase=QStringLiteral("idle"); break;
+        case ac::State::Fetching: phase=QStringLiteral("fetching"); break;
+        case ac::State::Admitting: phase=QStringLiteral("admitting"); break;
+        case ac::State::Starting: phase=QStringLiteral("starting"); break;
+        case ac::State::Verifying: phase=QStringLiteral("verifying"); break;
+        case ac::State::Connected: phase=QStringLiteral("connected"); break;
+        case ac::State::Stopping: phase=QStringLiteral("stopping"); break;
+        case ac::State::Failed: phase=QStringLiteral("failed"); break;
+        case ac::State::Cancelled: phase=QStringLiteral("cancelled"); break;
+        }
         switch(s.state) {
         case ac::State::Fetching: case ac::State::Admitting:
             terminal=false; output(Vpn::ConnectionState::Preparing,QStringLiteral("Выбираем доступный сервер…")); break;
@@ -292,7 +308,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         }
         for(auto& [tag,a]:attempts) { a->cancelled=true; if(a->ticket.valid()) bridge->cancel(a->ticket); }
         if(coordinator) coordinator->cancel();
-        else { preparing=false; terminal=true; timer.stop(); output(Vpn::ConnectionState::Disconnected,{}); }
+        else { preparing=false; terminal=true; timer.stop(); phase=QStringLiteral("cancelled"); output(Vpn::ConnectionState::Disconnected,{}); }
     }
     void retryCleanup() {
         if (!cleanupPending || cleanupOperation || !facade) return;
@@ -307,8 +323,9 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 if (attempt->stopped && !attempt->allocation.isEmpty()) { confirmed=true; break; }
             if (loaded.ok && confirmed) {
                 cleanupPending=false; cancelled=true; terminal=true; timer.stop();
+                phase=QStringLiteral("cancelled");
                 output(Vpn::ConnectionState::Disconnected,{});
-            } else output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось проверить сохранённую очистку. Отключение остаётся неподтверждённым."));
+            } else { phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось проверить сохранённую очистку. Отключение остаётся неподтверждённым.")); }
             return;
         }
         const auto record=loaded.records.first();
@@ -317,7 +334,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             for (const auto& [tag,candidate] : attempts)
                 if (candidate->identity==record.identity()) { attempt=candidate; break; }
             if (!attempt) {
-                output(Vpn::ConnectionState::Error,QStringLiteral("Сеанс VPN не подтверждён. Отключение остаётся неподтверждённым."));
+                phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,QStringLiteral("Сеанс VPN не подтверждён. Отключение остаётся неподтверждённым."));
                 return;
             }
             if (!attempt->stopped) {
@@ -334,7 +351,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                     if (!attempt->stopped) {
                         self->cleanupOperation=false;
                         self->cleanupPending=true;
-                        self->output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось подтвердить отключение. Нажмите «Повторить отключение»."));
+                        self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось подтвердить отключение. Нажмите «Повторить отключение»."));
                         return;
                     }
                     self->cleanupOperation=false;
@@ -358,10 +375,11 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             if (!response.success || !response.authenticatedResponse ||
                 !self->store->removeAfterConfirmedCleanup(record.identity()).ok) {
                 self->cleanupPending=true;
-                self->output(Vpn::ConnectionState::Error,QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора."));
+                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора."));
                 return;
             }
             self->cleanupPending=false; self->cancelled=true; self->terminal=true; self->timer.stop();
+            self->phase=QStringLiteral("cancelled");
             self->output(Vpn::ConnectionState::Disconnected,{});
         });
     }
@@ -537,7 +555,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             } else {
                 qInfo() << "MayakRelease ledger_remove attempted=false reason=release_not_accepted";
                 self->cleanupPending=true; self->terminal=true;
-                self->output(Vpn::ConnectionState::Error,QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора."));
+                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора."));
             }
         });
     }
@@ -579,11 +597,16 @@ MayakAutoConnectRuntime::~MayakAutoConnectRuntime() {
 }
 bool MayakAutoConnectRuntime::manages(const QString& id) const { return m_app && m_app->isMayakManagedServer(id); }
 bool MayakAutoConnectRuntime::busy() const { return m_session && (m_session->cleanupPending || !m_session->terminal || m_session->inFlight>0); }
-void MayakAutoConnectRuntime::publish(Vpn::ConnectionState state,const QString& text) { m_message=text; emit stateChanged(state,text); }
+void MayakAutoConnectRuntime::publish(Vpn::ConnectionState state,const QString& text,const QString& phase) {
+    m_message=text;
+    m_connectionPhase=phase;
+    emit stateChanged(state,text);
+}
 void MayakAutoConnectRuntime::begin(const QString& id) {
     if(m_session && m_session->cleanupPending) return;
     if(busy()) return;
     if(m_session) { m_session->facade=nullptr; m_session->coordinator.reset(); m_session.reset(); }
+    m_connectionPhase=QStringLiteral("preparing");
     m_session=std::make_shared<Session>(this,id); m_session->initialize();
 }
 void MayakAutoConnectRuntime::cancel() { if(m_session) m_session->stopUser(); }

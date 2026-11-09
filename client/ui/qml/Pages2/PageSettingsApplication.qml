@@ -44,6 +44,34 @@ PageType {
                 spacing: 0
 
                 ListItemType {
+                    id: appearanceRow
+                    Layout.fillWidth: true
+                    text: qsTr("Дневная тема")
+                    subtitle: qsTr("Изменить цветовое оформление приложения")
+                    SwitchType {
+                        id: appearanceSwitch
+                        objectName: "mayak-theme-setting"
+                        focusPolicy: Qt.NoFocus
+                        checked: AmneziaStyle.mayakDay
+                        onToggled: AmneziaStyle.mayakDay = checked
+                    }
+                }
+
+                ListItemType {
+                    id: reducedMotionRow
+                    Layout.fillWidth: true
+                    text: qsTr("Уменьшить движение")
+                    subtitle: qsTr("Отключить декоративную анимацию")
+                    SwitchType {
+                        id: reducedMotionSwitch
+                        objectName: "mayak-reduced-motion-setting"
+                        focusPolicy: Qt.NoFocus
+                        checked: AmneziaStyle.mayakReduceMotion
+                        onToggled: AmneziaStyle.mayakReduceMotion = checked
+                    }
+                }
+
+                ListItemType {
                     id: switcherAllowScreenshotsRow
 
                     Layout.fillWidth: true

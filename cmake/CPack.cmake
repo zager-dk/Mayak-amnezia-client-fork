@@ -133,6 +133,10 @@ if (APPLE AND NOT IOS AND NOT MACOS_NE)
     )
 endif()
 
+if(WIN32)
+    include("${CMAKE_SOURCE_DIR}/client/cmake/MayakIfwBranding.cmake")
+endif()
+
 include(CPackIFW)
 cpack_ifw_configure_component(AmneziaVPN
     VERSION ${AMNEZIAVPN_VERSION}

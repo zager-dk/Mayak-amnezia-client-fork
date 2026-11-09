@@ -1,0 +1,77 @@
+/* Mayak F7 night palette for Qt Installer Framework's existing Modern wizard. */
+QWidget {
+    background-color: #111827;
+    color: #ECEFF6;
+    font-family: "Segoe UI", sans-serif;
+    font-size: 10pt;
+}
+QWizard, QWizardPage { background-color: #111827; }
+QLabel { background: transparent; color: #ECEFF6; }
+QLabel#TitleLabel, QLabel#PageTitle { font-size: 14pt; font-weight: 600; }
+QLabel#SubTitleLabel, QLabel#PageSubTitle { color: #9CA6BE; }
+
+QPushButton {
+    min-height: 36px;
+    min-width: 96px;
+    padding: 4px 16px;
+    border-radius: 8px;
+    border: 1px solid #6B7998;
+    background-color: #18213A;
+    color: #ECEFF6;
+}
+QPushButton:hover { background-color: #222D4A; }
+QPushButton:focus { border: 2px solid #8DB4F0; }
+QPushButton:default:focus { border: 2px solid #111827; }
+QPushButton:disabled {
+    color: #9CA6BE;
+    background-color: #18213A;
+    border-color: #6B7998;
+}
+/* Keep Qt IFW's normal default-button behavior; only restyle its appearance. */
+QPushButton:default {
+    background-color: #FFC54D;
+    color: #1B1405;
+    border: 1px solid #FFC54D;
+    font-weight: 600;
+}
+QPushButton:default:hover { background-color: #FFD88A; }
+QPushButton:default:disabled,
+QPushButton:default:disabled:hover {
+    background-color: #18213A;
+    color: #9CA6BE;
+    border: 1px solid #6B7998;
+    font-weight: normal;
+}
+QPushButton:default:disabled:focus { border: 2px solid #8DB4F0; }
+
+QProgressBar {
+    min-height: 8px; max-height: 8px;
+    border: none; border-radius: 4px;
+    background-color: #222D4A;
+    text-align: center; color: transparent;
+}
+QProgressBar::chunk { border-radius: 4px; background-color: #FFC54D; }
+
+QTextBrowser, QPlainTextEdit, QLineEdit {
+    min-height: 36px;
+    padding: 2px 8px;
+    background-color: #0A0F1C;
+    border: 1px solid #6B7998;
+    border-radius: 8px;
+    color: #C6CDDD;
+    selection-background-color: #FFC54D;
+    selection-color: #1B1405;
+}
+QTextBrowser:focus, QPlainTextEdit:focus, QLineEdit:focus {
+    border: 2px solid #8DB4F0;
+}
+QCheckBox, QRadioButton {
+    min-height: 36px;
+    padding: 4px;
+    background: transparent;
+    color: #ECEFF6;
+}
+QCheckBox:disabled, QRadioButton:disabled { color: #9CA6BE; }
+QCheckBox:focus, QRadioButton:focus { border: 2px solid #8DB4F0; }
+QScrollBar:vertical { background: #111827; width: 10px; }
+QScrollBar::handle:vertical { background: #6B7998; border-radius: 5px; min-height: 24px; }

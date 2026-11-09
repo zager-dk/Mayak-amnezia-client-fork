@@ -16,10 +16,19 @@ The signed payload contains `product` (`mayak-vpn`), `channel` (`stable`),
 positive integer `versionCode`, same-origin HTTPS package `url`, exact byte
 `size`, lowercase SHA-256, and UTC `publishedAt` / `expiresAt`. Optional
 `releaseNotes` is plain text. Packages are limited to 512 MiB. The client
-rejects invalid signatures, stale versions, expired metadata, redirects,
-unexpected URLs, partial files and hash mismatches. It streams into a private
+rejects invalid signatures and expired metadata. A valid signed manifest whose
+version is equal to or older than the installed version is reported as no
+update; Android offers still require a strictly increasing `versionCode`. The
+client also rejects redirects, unexpected URLs, partial files and hash
+mismatches. It streams into a private
 per-user cache and rechecks the file immediately before opening the OS
 installer.
+
+For source compatibility, `UpdateController::verifySignedManifest` keeps its
+legacy boolean meaning when called without a disposition output: a valid
+equal/older manifest returns `false`. The controller passes the disposition
+output to distinguish a fully validated `NoNewer` manifest from invalid data;
+that form returns `true` for either valid disposition.
 
 ## Creating a feed envelope
 
@@ -48,13 +57,15 @@ version code compiled into that APK. Publish the artifact below
 ships fail-closed until those files are hosted. This repository change does not
 publish feed files or verify server deployment.
 
-Downloading requires the user to press the update action. Installing requires
-a second explicit action and is refused while the VPN tunnel is connecting,
-connected or disconnecting. Windows starts the verified Mayak installer for
-the user to confirm. Android uses FileProvider and the system package installer;
-the user may first need to allow installs from Mayak in Android settings. APK
-updates still require the permanent Android signing identity to match. No
-Windows Authenticode signature is claimed by the manifest signature.
+Downloading requires the user to press the update action. Installation also
+requires a separate explicit action. Windows refuses installation while the
+VPN tunnel is connecting, connected or disconnecting, then starts the verified
+Mayak installer for the user to confirm. On Android, if installs from Mayak are
+not allowed, the first Install tap opens Android settings; returning to Mayak
+does not install automatically, and the user must tap Install again to open the
+system package installer. APK updates still require the permanent Android
+signing identity to match. No Windows Authenticode signature is claimed by the
+manifest signature.
 
 The application checks on startup and every six hours by default, honors the
 saved automatic-check opt-out, and always allows a manual About-page check.

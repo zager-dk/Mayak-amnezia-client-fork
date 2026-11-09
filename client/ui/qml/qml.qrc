@@ -10,6 +10,13 @@
         <file>Components/UpdateSupportDrawer.qml</file>
         <file>Components/PromoBanner.qml</file>
         <file>Components/ConnectButton.qml</file>
+        <file>newComponents/Mayak/qmldir</file>
+        <file>newComponents/Mayak/MayakBeacon.qml</file>
+        <file>newComponents/Mayak/assets/f7-layer-sky.svg</file>
+        <file>newComponents/Mayak/assets/f7-layer-land-tower.svg</file>
+        <file>newComponents/Mayak/assets/mayak-f7-small-on.svg</file>
+                <file alias="fonts/Onest.ttf">../../fonts/Mayak/Onest.ttf</file>
+        <file alias="fonts/JetBrainsMono-Regular.ttf">../../fonts/Mayak/JetBrainsMono-Regular.ttf</file>
         <file>Components/CountryListStickyHeader.qml</file>
         <file>Components/CountrySearchRow.qml</file>
         <file>Components/CountrySectionHeader.qml</file>

@@ -15,6 +15,7 @@
 #include "core/models/api/apiV2ServerConfig.h"
 #include "core/utils/constants/apiKeys.h"
 #include "core/utils/constants/configKeys.h"
+#include "ui/controllers/connectionUiController.h"
 
 using namespace amnezia;
 using B=MayakBackendBridge;
@@ -44,6 +45,7 @@ struct World : QObject {
     QStringList events;
     int acquires=0, starts=0, releases=0, reconciles=0, stops=0;
     bool fullFirst=false, deadFirst=false, lostAcquire=false, badProof=false, holdStart=false;
+    bool holdPermission=false;
     bool backendRunning=false, missingStop=false, failRelease=false, failStopOnce=false, holdNextStop=false;
     int releaseDelay=0;
     int acquireDelay=0;
@@ -54,6 +56,8 @@ struct World : QObject {
     AwgTunnelHealth health;
     std::function<void(B::Ticket,AwgTunnelHealth)> observeHealth;
     B::Done startDone;
+    QString permissionRequestId;
+    B::PermissionDone heldPermissionDone;
     B::Done heldStopDone;
     QString heldStopNonce;
     std::function<void(B::Result)> observeDown;
@@ -71,6 +75,14 @@ struct World : QObject {
         port.observe=[this](QObject*,auto healthCallback,auto downCallback){observeHealth=healthCallback;observeDown=downCallback;};
         port.inspect=[this](QString nonce,qint64,B::Inspected done) {
             events<<"inspect"; done({backendRunning?B::OwnState::Unknown:B::OwnState::Off,nonce,{},{}});
+        };
+        port.preparePermissions=[this](QString requestId,B::PermissionDone done) {
+            permissionRequestId=requestId;
+            if (holdPermission) heldPermissionDone=std::move(done);
+            else done(requestId,B::PermissionResult::Ready);
+        };
+        port.cancelPermissionPreparation=[this](QString requestId) {
+            if (requestId==permissionRequestId) heldPermissionDone={};
         };
         port.start=[this](B::Ticket ticket,QString,QJsonObject,qint64,B::Done done) {
             ++starts; events<<"start"; current=ticket;
@@ -162,6 +174,113 @@ struct World : QObject {
 class RuntimeTest : public QObject {
     Q_OBJECT
 private slots:
+    void phaseSnapshotReportsEveryCoordinatorState() {
+        World w;
+        QStringList phases;
+        QList<Vpn::ConnectionState> coarseStates;
+        connect(w.runtime.get(), &MayakAutoConnectRuntime::stateChanged, &w,
+                [&w, &phases, &coarseStates](Vpn::ConnectionState state, const QString&) {
+            phases.append(w.runtime->connectionPhase());
+            coarseStates.append(state);
+        });
+
+        w.runtime->begin(w.id);
+        QCOMPARE(w.runtime->connectionPhase(), QStringLiteral("preparing"));
+        QTRY_COMPARE_WITH_TIMEOUT(w.state, Vpn::ConnectionState::Connected, 5000);
+        for (const auto& phase : {QStringLiteral("fetching"), QStringLiteral("admitting"),
+                                  QStringLiteral("starting"), QStringLiteral("verifying"),
+                                  QStringLiteral("connected")})
+            QVERIFY2(phases.contains(phase), qPrintable(QStringLiteral("missing phase: ") + phase));
+
+        const int fetching = phases.indexOf(QStringLiteral("fetching"));
+        const int admitting = phases.indexOf(QStringLiteral("admitting"));
+        const int starting = phases.indexOf(QStringLiteral("starting"));
+        const int verifying = phases.indexOf(QStringLiteral("verifying"));
+        QVERIFY(fetching >= 0 && admitting > fetching);
+        QVERIFY(starting > admitting && verifying > starting);
+        QCOMPARE(coarseStates.at(fetching), Vpn::ConnectionState::Preparing);
+        QCOMPARE(coarseStates.at(admitting), Vpn::ConnectionState::Preparing);
+        QCOMPARE(coarseStates.at(starting), Vpn::ConnectionState::Connecting);
+        QCOMPARE(coarseStates.at(verifying), Vpn::ConnectionState::Connecting);
+
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.runtime->connectionPhase(), QStringLiteral("cancelled"), 2000);
+    }
+
+    void heldPreflightAndIdentityDriftPreserveDisconnectedBehavior() {
+        World w;
+        w.holdPermission=true;
+        QSignalSpy states(w.runtime.get(), &MayakAutoConnectRuntime::stateChanged);
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(bool(w.heldPermissionDone), 2000);
+        QCOMPARE(w.runtime->connectionPhase(), QStringLiteral("preparing"));
+        QVERIFY(!w.events.contains(QStringLiteral("config")));
+        QTest::qWait(50);
+        QCOMPARE(w.runtime->connectionPhase(), QStringLiteral("preparing"));
+        QVERIFY(!w.events.contains(QStringLiteral("config")));
+
+        // Remove the active identity without emitting mayakSessionChanging so
+        // Ready reaches the existing identity-drift branch uncancelled.
+        w.settings.clearSettings();
+        auto ready=std::move(w.heldPermissionDone);
+        ready(w.permissionRequestId,B::PermissionResult::Ready);
+        QTRY_COMPARE_WITH_TIMEOUT(w.runtime->connectionPhase(), QStringLiteral("idle"), 2000);
+        QCOMPARE(w.state, Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->message(), QString());
+        QCOMPARE(w.runtime->connectionPhase(), QStringLiteral("idle"));
+        QVERIFY(!w.events.contains(QStringLiteral("config")));
+        const auto last=states.last();
+        QCOMPARE(last.at(0).value<Vpn::ConnectionState>(), Vpn::ConnectionState::Disconnected);
+        QCOMPARE(last.at(1).toString(), QString());
+    }
+
+    void newSessionResetsFailurePhaseBeforeHeldPermission() {
+        World w;
+        w.badProof=true;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,8000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("failed"));
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),2000);
+
+        w.badProof=false;
+        w.holdPermission=true;
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(bool(w.heldPermissionDone),2000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("preparing"));
+        w.runtime->cancel();
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+    }
+
+    void uiPhasePropertyNotifiesAcrossSameCoarseStates() {
+        World w;
+        w.badProof = true; // Exercise Verifying and terminal failure without Connected UI side effects.
+        ConnectionUiController ui(&w.connection, nullptr);
+        QStringList phases;
+        QList<bool> inProgress;
+        connect(&ui, &ConnectionUiController::connectionStateChanged, &w, [&] {
+            phases.append(ui.connectionPhase());
+            inProgress.append(ui.isConnectionInProgress());
+        });
+
+        QCOMPARE(w.connection.openConnection(w.id), ErrorCode::NoError);
+        QCOMPARE(ui.connectionPhase(), QStringLiteral("preparing"));
+        QTRY_COMPARE_WITH_TIMEOUT(w.state, Vpn::ConnectionState::Error, 8000);
+        for (const auto& phase : {QStringLiteral("fetching"), QStringLiteral("admitting"),
+                                  QStringLiteral("starting"), QStringLiteral("verifying")})
+            QVERIFY2(phases.contains(phase), qPrintable(QStringLiteral("UI missed phase: ") + phase));
+
+        const int fetching = phases.indexOf(QStringLiteral("fetching"));
+        const int admitting = phases.indexOf(QStringLiteral("admitting"));
+        const int starting = phases.indexOf(QStringLiteral("starting"));
+        const int verifying = phases.indexOf(QStringLiteral("verifying"));
+        QCOMPARE(inProgress.at(fetching), true);
+        QCOMPARE(inProgress.at(admitting), true);
+        QCOMPARE(inProgress.at(starting), true);
+        QCOMPARE(inProgress.at(verifying), true);
+        QVERIFY(admitting > fetching && starting > admitting && verifying > starting);
+        QVERIFY(phases.contains(QStringLiteral("failed")));
+    }
+
     void acquiredConfigMatchesFactoryContract() {
         World w;
         SubscriptionController::ProtocolData keys;
@@ -338,10 +457,15 @@ private slots:
     }
     void failedNativeStopRetriesSameOwnerAndStaysOff() {
         World w; w.failStopOnce=true;
+        QStringList phases;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,
+                [&w,&phases](Vpn::ConnectionState,const QString&) { phases.append(w.runtime->connectionPhase()); });
         w.runtime->begin(w.id);
         QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
         w.runtime->cancel();
         QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),1000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("failed"));
+        QVERIFY(phases.contains(QStringLiteral("failed")));
         const int starts=w.starts, acquires=w.acquires;
         const int stops=w.stops;
         QVERIFY(w.backendRunning);
@@ -351,13 +475,20 @@ private slots:
         QCOMPARE(w.stops,stops+1);
         QVERIFY(!w.backendRunning); QCOMPARE(w.records(),0);
         QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        QVERIFY(phases.contains(QStringLiteral("cancelled")));
     }
     void serverCleanupRetryUsesExistingRecordWithoutReconnect() {
         World w; w.failRelease=true;
+        QStringList phases;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,
+                [&w,&phases](Vpn::ConnectionState,const QString&) { phases.append(w.runtime->connectionPhase()); });
         w.runtime->begin(w.id);
         QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
         w.runtime->cancel();
         QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),1500);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("failed"));
+        QVERIFY(phases.contains(QStringLiteral("failed")));
         QVERIFY(!w.backendRunning); QCOMPARE(w.records(),1);
         const int starts=w.starts, acquires=w.acquires;
         w.app.setMayakSessionToken("different-account-session");
@@ -367,6 +498,8 @@ private slots:
         QCOMPARE(w.starts,starts); QCOMPARE(w.acquires,acquires);
         QCOMPARE(w.records(),0); QVERIFY(w.reconciles>0);
         QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        QVERIFY(phases.contains(QStringLiteral("cancelled")));
     }
     void directBeginCannotReplacePendingCleanup() {
         World w; w.failRelease=true;
@@ -424,6 +557,9 @@ private slots:
         QVERIFY(!original.installationUuid().isEmpty());
         QVERIFY(!original.publicKey().isEmpty());
         const auto ticket=w.current;
+        QStringList phases;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,
+                [&w,&phases](Vpn::ConnectionState,const QString&) { phases.append(w.runtime->connectionPhase()); });
         const int configs=w.events.count("config"), starts=w.starts, acquires=w.acquires;
         w.holdNextStop=true; w.runtime->cancel();
         QTRY_VERIFY_WITH_TIMEOUT(bool(w.heldStopDone),1000);
@@ -449,6 +585,7 @@ private slots:
         QCOMPARE(w.reconciles,1); QCOMPARE(w.records(),0);
         QCOMPARE(w.events.count("config"),configs); QCOMPARE(w.starts,starts); QCOMPARE(w.acquires,acquires);
         QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
         QJsonObject reconcile;
         for (const auto& payload:w.requestPayloads)
             if (payload.value("action")=="reconcile") reconcile=payload;
@@ -468,11 +605,14 @@ private slots:
         w.servers.editServer(w.id,config.toJson(),serverConfigUtils::configTypeFromJson(config.toJson()));
         w.missingStop=false; w.runtime->begin(w.id);
         QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("connected"));
         QVERIFY(!w.current.same(ticket));
         originalDone({ticket,B::Outcome::ConfirmedDown,{},nonce});
         w.observeDown({ticket,B::Outcome::ConfirmedDown});
         QTest::qWait(50);
         QVERIFY(w.backendRunning); QCOMPARE(w.state,Vpn::ConnectionState::Connected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("connected"));
+        QVERIFY(phases.contains(QStringLiteral("cancelled")));
         w.runtime->cancel(); QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,2000);
     }
     void mismatchedNativePositiveCannotConfirmCleanup() {

@@ -9,6 +9,8 @@ UpdateUiController::UpdateUiController(UpdateController* updateController, QObje
     if (m_updateController) {
         connect(m_updateController, &UpdateController::updateFound, this, &UpdateUiController::updateFound);
         connect(m_updateController, &UpdateController::updateNotFound, this, &UpdateUiController::updateNotFound);
+        connect(m_updateController, &UpdateController::updateFound, this, &UpdateUiController::updateMetadataChanged);
+        connect(m_updateController, &UpdateController::updateNotFound, this, &UpdateUiController::updateMetadataChanged);
         connect(m_updateController, &UpdateController::updateCheckFailed, this, &UpdateUiController::updateCheckFailed);
         connect(m_updateController, &UpdateController::updateStateChanged, this, &UpdateUiController::updateStateChanged);
         connect(m_updateController, &UpdateController::updateCheckRunningChanged, this, &UpdateUiController::isCheckRunningChanged);

@@ -54,7 +54,7 @@ PageType {
                 Layout.preferredWidth: 153
                 Layout.preferredHeight: 131
 
-                source: "qrc:/images/amneziaLogo.svg"
+                source: "qrc:/images/mayak-mark-round-128.png"
                 sourceSize: Qt.size(153 * Screen.devicePixelRatio, 131 * Screen.devicePixelRatio)
                 fillMode: Image.PreserveAspectFit
             }
@@ -66,7 +66,7 @@ PageType {
                 Layout.rightMargin: 16
 
                 horizontalAlignment: Text.AlignHCenter
-                text: qsTr("Support Amnezia")
+                text: qsTr("Поддержать Маяк")
             }
 
             BodyTextType {
@@ -77,7 +77,7 @@ PageType {
 
                 horizontalAlignment: Text.AlignHCenter
                 color: AmneziaStyle.color.textSecondary
-                text: qsTr("Amnezia is a free and open-source application. You can support the developers if you like it.")
+                text: qsTr("Маяк — бесплатное приложение с открытым исходным кодом. Вы можете поддержать команду разработки.")
             }
 
             ColumnLayout {

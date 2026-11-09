@@ -9,13 +9,13 @@ class UpdateUiController : public QObject
 {
     Q_OBJECT
 
-    Q_PROPERTY(QString version READ getVersion NOTIFY updateFound)
-    Q_PROPERTY(QString releaseInfoText READ getReleaseInfoText NOTIFY updateFound)
-    Q_PROPERTY(QString description READ getDescription NOTIFY updateFound)
-    Q_PROPERTY(QStringList tags READ getTags NOTIFY updateFound)
-    Q_PROPERTY(QStringList newFeatures READ getNewFeatures NOTIFY updateFound)
-    Q_PROPERTY(QStringList improvements READ getImprovements NOTIFY updateFound)
-    Q_PROPERTY(QStringList bugFixes READ getBugFixes NOTIFY updateFound)
+    Q_PROPERTY(QString version READ getVersion NOTIFY updateMetadataChanged)
+    Q_PROPERTY(QString releaseInfoText READ getReleaseInfoText NOTIFY updateMetadataChanged)
+    Q_PROPERTY(QString description READ getDescription NOTIFY updateMetadataChanged)
+    Q_PROPERTY(QStringList tags READ getTags NOTIFY updateMetadataChanged)
+    Q_PROPERTY(QStringList newFeatures READ getNewFeatures NOTIFY updateMetadataChanged)
+    Q_PROPERTY(QStringList improvements READ getImprovements NOTIFY updateMetadataChanged)
+    Q_PROPERTY(QStringList bugFixes READ getBugFixes NOTIFY updateMetadataChanged)
     Q_PROPERTY(int updateState READ getUpdateState NOTIFY updateStateChanged)
     Q_PROPERTY(bool isStoreUpdate READ isStoreUpdate CONSTANT)
     Q_PROPERTY(bool isCheckRunning READ isCheckRunning NOTIFY isCheckRunningChanged)
@@ -48,6 +48,7 @@ public slots:
     void cancel();
 
 signals:
+    void updateMetadataChanged();
     void manualCheckStarted();
     void updateFound();
     void updateNotFound();

@@ -127,6 +127,11 @@ QString ConnectionUiController::connectionStateText() const
     return m_connectionStateText;
 }
 
+QString ConnectionUiController::connectionPhase() const
+{
+    return m_connectionController->managedConnectionPhase();
+}
+
 bool ConnectionUiController::cleanupPending() const
 {
     return m_connectionController->managedCleanupPending();

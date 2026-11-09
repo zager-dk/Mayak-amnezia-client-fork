@@ -399,7 +399,8 @@ bool UpdateController::isAllowedPackageUrl(const QUrl &url, const QUrl &manifest
 bool UpdateController::verifySignedManifest(const QByteArray &envelopeBytes, const QByteArray &publicKeyPem,
                                             const QString &expectedPlatform, const QString &installedVersion,
                                             quint64 installedVersionCode, const QUrl &manifestUrl,
-                                            const QDateTime &nowUtc, SignedUpdateManifest *manifest, QString *error)
+                                            const QDateTime &nowUtc, SignedUpdateManifest *manifest, QString *error,
+                                            SignedUpdateManifestDisposition *disposition)
 {
     if (!manifest || envelopeBytes.isEmpty() || envelopeBytes.size() > kMaxManifestBytes) {
         return failWith(error, QStringLiteral("The update manifest is empty or too large."));
@@ -485,10 +486,10 @@ bool UpdateController::verifySignedManifest(const QByteArray &envelopeBytes, con
     parsed.versionCode = versionCode;
 
     int versionComparison = 0;
-    if (!compareVersions(parsed.version, installedVersion, &versionComparison) || versionComparison <= 0) {
-        return failWith(error, QStringLiteral("The signed update version is not newer than the installed version."));
+    if (!compareVersions(parsed.version, installedVersion, &versionComparison)) {
+        return failWith(error, QStringLiteral("The signed update version is invalid."));
     }
-    if (expectedPlatform == QStringLiteral("android-arm64") && versionCode <= installedVersionCode) {
+    if (versionComparison > 0 && expectedPlatform == QStringLiteral("android-arm64") && versionCode <= installedVersionCode) {
         return failWith(error, QStringLiteral("The Android update version code is not newer than the installed app."));
     }
     if (!isAllowedPackageUrl(parsed.url, manifestUrl, error)) {
@@ -515,6 +516,15 @@ bool UpdateController::verifySignedManifest(const QByteArray &envelopeBytes, con
         if (parsed.releaseNotes.size() > 10000 || parsed.releaseNotes.contains(QChar::Null)) {
             return failWith(error, QStringLiteral("The update release notes are too long or malformed."));
         }
+    }
+
+    const SignedUpdateManifestDisposition parsedDisposition = versionComparison > 0
+        ? SignedUpdateManifestDisposition::Newer : SignedUpdateManifestDisposition::NoNewer;
+    if (disposition) {
+        *disposition = parsedDisposition;
+    }
+    if (parsedDisposition == SignedUpdateManifestDisposition::NoNewer && !disposition) {
+        return failWith(error, QStringLiteral("The signed update version is not newer than the installed version."));
     }
 
     *manifest = parsed;
@@ -691,10 +701,11 @@ void UpdateController::finishManifestRequest()
 
     SignedUpdateManifest update;
     QString error;
+    SignedUpdateManifestDisposition disposition = SignedUpdateManifestDisposition::Newer;
     if (!verifySignedManifest(m_manifestBuffer, m_dependencies.signingPublicKeyPem,
                               m_dependencies.platform, m_dependencies.installedVersion,
                               m_dependencies.installedVersionCode, m_dependencies.manifestUrl,
-                              currentTimeUtc(), &update, &error)) {
+                              currentTimeUtc(), &update, &error, &disposition)) {
         logger.warning() << "Signed update manifest rejected:" << error;
         m_manifestBuffer.clear();
         setStatusMessage(tr("Сервер не вернул проверенное обновление."));
@@ -702,6 +713,26 @@ void UpdateController::finishManifestRequest()
         return;
     }
     m_manifestBuffer.clear();
+
+    if (disposition == SignedUpdateManifestDisposition::NoNewer) {
+        if (!m_verifiedArtifactPath.isEmpty()) {
+            QFile::remove(m_verifiedArtifactPath);
+        }
+        m_verifiedArtifactPath.clear();
+        m_signedUpdate = {};
+        m_version.clear();
+        m_releaseDate.clear();
+        m_description.clear();
+        m_tags.clear();
+        m_newFeatures.clear();
+        m_improvements.clear();
+        m_bugFixes.clear();
+        setDownloadProgress(0);
+        setUpdateState(UpdateState::State::Idle);
+        setStatusMessage(tr("Установлена последняя версия приложения."));
+        emit updateNotFound();
+        return;
+    }
 
     m_signedUpdate = update;
     m_version = update.version;

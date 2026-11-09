@@ -51,6 +51,8 @@ struct SignedUpdateManifest {
     QString releaseNotes;
 };
 
+enum class SignedUpdateManifestDisposition { Newer, NoNewer };
+
 // Explicit dependencies make the real controller testable with loopback
 // transport, a generated fixture key and a non-executing installer callback.
 struct UpdateControllerDependencies {
@@ -92,10 +94,13 @@ public:
     QString getStatusMessage() const;
     void setTunnelDisconnectedProvider(std::function<bool()> provider) { m_dependencies.tunnelDisconnected = std::move(provider); }
 
+    // Without disposition, preserves legacy bool semantics: a valid but non-newer
+    // manifest returns false. Supplying disposition returns true for valid NoNewer data.
     static bool verifySignedManifest(const QByteArray &envelope, const QByteArray &publicKeyPem,
                                      const QString &expectedPlatform, const QString &installedVersion,
                                      quint64 installedVersionCode, const QUrl &manifestUrl, const QDateTime &nowUtc,
-                                     SignedUpdateManifest *manifest, QString *error = nullptr);
+                                     SignedUpdateManifest *manifest, QString *error = nullptr,
+                                     SignedUpdateManifestDisposition *disposition = nullptr);
     static bool isAllowedPackageUrl(const QUrl &url, const QUrl &manifestUrl, QString *error = nullptr);
 
 public slots:

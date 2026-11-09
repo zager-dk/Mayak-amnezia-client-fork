@@ -331,7 +331,6 @@ private slots:
             {QStringLiteral("product"), QStringLiteral("other-product")},
             {QStringLiteral("platform"), QStringLiteral("android-arm64")},
             {QStringLiteral("channel"), QStringLiteral("beta")},
-            {QStringLiteral("version"), QStringLiteral("5.1.0.4")},
             {QStringLiteral("version"), QStringLiteral("05.1.0.5")},
             {QStringLiteral("version"), QStringLiteral("5.1.65536.0")},
             {QStringLiteral("version"), QStringLiteral("6.99999.0.0")},
@@ -355,9 +354,15 @@ private slots:
 
         SignedUpdateManifest ignored;
         QString error;
+        SignedUpdateManifestDisposition disposition = SignedUpdateManifestDisposition::Newer;
+        QVERIFY(UpdateController::verifySignedManifest(original, signing.publicPem,
+            QStringLiteral("windows-x64"), QStringLiteral("5.2.9999.0"), 0, feed,
+            QDateTime::currentDateTimeUtc(), &ignored, &error, &disposition));
+        QCOMPARE(disposition, SignedUpdateManifestDisposition::NoNewer);
         QVERIFY(!UpdateController::verifySignedManifest(original, signing.publicPem,
-            QStringLiteral("windows-x64"), QStringLiteral("5.2.99999.0"), 0, feed,
+            QStringLiteral("windows-x64"), QStringLiteral("5.2.9999.0"), 0, feed,
             QDateTime::currentDateTimeUtc(), &ignored, &error));
+        QVERIFY(error.contains(QStringLiteral("not newer")));
 
         QVERIFY(!UpdateController::verifySignedManifest(QByteArray(128 * 1024 + 1, 'x'), signing.publicPem,
             QStringLiteral("windows-x64"), QStringLiteral("5.1.0.4"), 0, feed,
@@ -392,6 +397,160 @@ private slots:
             QStringLiteral("android-arm64"), QStringLiteral("5.1.0.4"), 2186, feed,
             QDateTime::currentDateTimeUtc(), &parsed, &error), qPrintable(error));
         QCOMPARE(parsed.versionCode, quint64(2187));
+        EVP_PKEY_free(signing.privateKey);
+    }
+
+    void validEqualOrOlderFeedIsNoUpdateWithoutPackageOrInstaller()
+    {
+        SigningFixture signing = makeSigningFixture();
+        QVERIFY(signing.privateKey);
+        const QUrl feed(QStringLiteral("https://mayaklight.ru/updates/stable/windows-x64.json"));
+        for (const QString &version : {QStringLiteral("5.1.0.4"), QStringLiteral("5.1.0.3")}) {
+            FixtureNetwork network;
+            network.package = QByteArray("fixture package must not be fetched");
+            QJsonObject payload {
+                {"product", "mayak-vpn"}, {"channel", "stable"}, {"platform", "windows-x64"},
+                {"version", version}, {"versionCode", 2187},
+                {"url", "https://mayaklight.ru/updates/packages/mayak-5.1.0.5.exe"},
+                {"size", network.package.size()},
+                {"sha256", QString::fromLatin1(QCryptographicHash::hash(network.package, QCryptographicHash::Sha256).toHex())},
+                {"publishedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
+                {"expiresAt", QDateTime::currentDateTimeUtc().addDays(1).toString(Qt::ISODate)}
+            };
+            network.manifest = makeEnvelopeForPayload(signing.privateKey,
+                QJsonDocument(payload).toJson(QJsonDocument::Compact));
+            QTemporaryDir cache(QDir::currentPath() + QStringLiteral("/update-no-newer-XXXXXX"));
+            UpdateControllerDependencies dependencies;
+            dependencies.networkAccessManager = &network;
+            dependencies.signingPublicKeyPem = signing.publicPem;
+            dependencies.manifestUrl = feed;
+            dependencies.platform = QStringLiteral("windows-x64");
+            dependencies.installedVersion = QStringLiteral("5.1.0.4");
+            dependencies.cacheDirectory = cache.path();
+            dependencies.automaticChecksEnabled = false;
+            dependencies.checkOnConstruction = false;
+            int installerCalls = 0;
+            dependencies.installerLauncher = [&installerCalls](const QString &) { ++installerCalls; return true; };
+            UpdateController controller(nullptr, dependencies);
+            QSignalSpy notFoundSpy(&controller, &UpdateController::updateNotFound);
+            QSignalSpy foundSpy(&controller, &UpdateController::updateFound);
+            QSignalSpy failedSpy(&controller, &UpdateController::updateCheckFailed);
+            controller.checkForUpdates();
+            QTRY_COMPARE_WITH_TIMEOUT(notFoundSpy.count(), 1, 2000);
+            QCOMPARE(foundSpy.count(), 0);
+            QCOMPARE(failedSpy.count(), 0);
+            QVERIFY(controller.getVersion().isEmpty());
+            QCOMPARE(network.packageRequests, 0);
+            controller.startUpdate();
+            QCOMPARE(network.packageRequests, 0);
+            controller.installUpdate();
+            QCOMPARE(installerCalls, 0);
+            QVERIFY(QDir(cache.path()).entryList(QDir::Files).isEmpty());
+        }
+        EVP_PKEY_free(signing.privateKey);
+    }
+
+    void downloadedOfferIsDiscardedWhenLaterFeedHasNoNewerVersion()
+    {
+        SigningFixture signing = makeSigningFixture();
+        QVERIFY(signing.privateKey);
+        FixtureNetwork network;
+        network.package = QByteArray("verified fixture package");
+        network.manifest = makeEnvelope(signing.privateKey, network.package);
+        QTemporaryDir cache(QDir::currentPath() + QStringLiteral("/update-stale-artifact-XXXXXX"));
+        QVERIFY(cache.isValid());
+        UpdateControllerDependencies dependencies;
+        dependencies.networkAccessManager = &network;
+        dependencies.signingPublicKeyPem = signing.publicPem;
+        dependencies.manifestUrl = QUrl(QStringLiteral("https://mayaklight.ru/updates/stable/windows-x64.json"));
+        dependencies.platform = QStringLiteral("windows-x64");
+        dependencies.installedVersion = QStringLiteral("5.1.0.4");
+        dependencies.cacheDirectory = cache.path();
+        dependencies.automaticChecksEnabled = false;
+        dependencies.checkOnConstruction = false;
+        int installerCalls = 0;
+        dependencies.installerLauncher = [&installerCalls](const QString &) { ++installerCalls; return true; };
+        UpdateController controller(nullptr, dependencies);
+        UpdateUiController uiController(&controller);
+        QSignalSpy foundSpy(&controller, &UpdateController::updateFound);
+        QSignalSpy notFoundSpy(&controller, &UpdateController::updateNotFound);
+        QSignalSpy metadataChangedSpy(&uiController, &UpdateUiController::updateMetadataChanged);
+        controller.checkForUpdates();
+        QTRY_COMPARE_WITH_TIMEOUT(foundSpy.count(), 1, 2000);
+        QCOMPARE(metadataChangedSpy.count(), 1);
+        controller.startUpdate();
+        QTRY_COMPARE_WITH_TIMEOUT(controller.getUpdateState(), UpdateState::State::ReadyToInstall, 2000);
+        const QStringList cachedPackages = QDir(cache.path()).entryList({QStringLiteral("*.exe")}, QDir::Files);
+        QCOMPARE(cachedPackages.size(), 1);
+
+        const QJsonObject offerEnvelope = QJsonDocument::fromJson(network.manifest).object();
+        QJsonObject currentPayload = QJsonDocument::fromJson(QByteArray::fromBase64(
+            offerEnvelope.value(QStringLiteral("payload")).toString().toLatin1())).object();
+        currentPayload.insert(QStringLiteral("version"), QStringLiteral("5.1.0.4"));
+        network.manifest = makeEnvelopeForPayload(signing.privateKey,
+            QJsonDocument(currentPayload).toJson(QJsonDocument::Compact));
+        controller.checkForUpdates();
+        QTRY_COMPARE_WITH_TIMEOUT(notFoundSpy.count(), 1, 2000);
+        QCOMPARE(metadataChangedSpy.count(), 2);
+        QCOMPARE(controller.getUpdateState(), UpdateState::State::Idle);
+        QVERIFY(controller.getVersion().isEmpty());
+        QVERIFY(uiController.getVersion().isEmpty());
+        QVERIFY(QDir(cache.path()).entryList({QStringLiteral("*.exe")}, QDir::Files).isEmpty());
+        controller.startUpdate();
+        QTRY_COMPARE_WITH_TIMEOUT(notFoundSpy.count(), 2, 2000);
+        controller.installUpdate();
+        QCOMPARE(network.packageRequests, 1);
+        QCOMPARE(installerCalls, 0);
+        EVP_PKEY_free(signing.privateKey);
+    }
+
+    void equalVersionStillRejectsInvalidSignatureExpiryAndUrl()
+    {
+        SigningFixture signing = makeSigningFixture();
+        QVERIFY(signing.privateKey);
+        const QUrl feed(QStringLiteral("https://mayaklight.ru/updates/stable/windows-x64.json"));
+        QJsonObject payload {
+            {"product", "mayak-vpn"}, {"channel", "stable"}, {"platform", "windows-x64"},
+            {"version", "5.1.0.4"}, {"versionCode", 2187},
+            {"url", "https://mayaklight.ru/updates/packages/mayak-5.1.0.4.exe"},
+            {"size", 1}, {"sha256", QString(64, QLatin1Char('a'))},
+            {"publishedAt", QDateTime::currentDateTimeUtc().toString(Qt::ISODate)},
+            {"expiresAt", QDateTime::currentDateTimeUtc().addDays(1).toString(Qt::ISODate)}
+        };
+        QList<QByteArray> invalidEnvelopes;
+        QJsonObject expired = payload;
+        expired.insert(QStringLiteral("expiresAt"), QStringLiteral("2020-01-01T00:00:00Z"));
+        invalidEnvelopes.append(makeEnvelopeForPayload(signing.privateKey, QJsonDocument(expired).toJson(QJsonDocument::Compact)));
+        QJsonObject unsafeUrl = payload;
+        unsafeUrl.insert(QStringLiteral("url"), QStringLiteral("https://evil.example/updates/packages/file.exe"));
+        invalidEnvelopes.append(makeEnvelopeForPayload(signing.privateKey, QJsonDocument(unsafeUrl).toJson(QJsonDocument::Compact)));
+        QByteArray badSignature = makeEnvelopeForPayload(signing.privateKey, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        QJsonObject envelope = QJsonDocument::fromJson(badSignature).object();
+        QByteArray signature = QByteArray::fromBase64(envelope.value(QStringLiteral("signature")).toString().toLatin1());
+        signature[0] = static_cast<char>(signature[0] ^ 1);
+        envelope.insert(QStringLiteral("signature"), QString::fromLatin1(signature.toBase64()));
+        invalidEnvelopes.append(QJsonDocument(envelope).toJson(QJsonDocument::Compact));
+        for (const QByteArray &invalidEnvelope : invalidEnvelopes) {
+            FixtureNetwork network;
+            network.manifest = invalidEnvelope;
+            QTemporaryDir cache(QDir::currentPath() + QStringLiteral("/update-invalid-no-newer-XXXXXX"));
+            UpdateControllerDependencies dependencies;
+            dependencies.networkAccessManager = &network;
+            dependencies.signingPublicKeyPem = signing.publicPem;
+            dependencies.manifestUrl = feed;
+            dependencies.platform = QStringLiteral("windows-x64");
+            dependencies.installedVersion = QStringLiteral("5.1.0.4");
+            dependencies.cacheDirectory = cache.path();
+            dependencies.automaticChecksEnabled = false;
+            dependencies.checkOnConstruction = false;
+            UpdateController controller(nullptr, dependencies);
+            QSignalSpy notFoundSpy(&controller, &UpdateController::updateNotFound);
+            QSignalSpy failedSpy(&controller, &UpdateController::updateCheckFailed);
+            controller.checkForUpdates();
+            QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 2000);
+            QCOMPARE(notFoundSpy.count(), 0);
+            QCOMPARE(network.packageRequests, 0);
+        }
         EVP_PKEY_free(signing.privateKey);
     }
 

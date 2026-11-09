@@ -68,6 +68,7 @@ public:
     bool isMayakManaged(const QString& serverId) const;
     bool isMayakActive() const { return m_managedActive; }
     QString managedMessage() const;
+    QString managedConnectionPhase() const;
     bool managedCleanupPending() const;
     void retryManagedCleanup();
     bool canInstallUpdate() const;

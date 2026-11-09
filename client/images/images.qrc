@@ -4,6 +4,7 @@
     </qresource>
     <qresource prefix="/images">
         <file>amneziaLogo.svg</file>
+        <file>mayak-mark-round-128.png</file>
         <file>AmneziaVPN.png</file>
         <file>controls/alert-circle.svg</file>
         <file>controls/alert-triangle.svg</file>

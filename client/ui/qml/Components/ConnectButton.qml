@@ -1,166 +1,104 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Shapes
-
+import QtQuick.Window
 import Style 1.0
-
-import "../Controls2"
 import "../Controls2/TextTypes"
+import "../newComponents/Mayak"
 
 Button {
     id: root
 
     property bool connected: ConnectionController.isConnected
     property bool inProgress: ConnectionController.isConnectionInProgress
+    readonly property string archivePhase: {
+        if (ConnectionController.cleanupPending) return "CleanupPending"
+        switch (ConnectionController.connectionPhase) {
+        case "preparing": return "Preparing"
+        case "fetching": return "Fetching"
+        case "admitting": return "Admitting"
+        case "starting": return "Starting"
+        case "verifying": return "Verifying"
+        case "connected": return "Connected"
+        case "stopping": return "Stopping"
+        case "failed": return "Failed"
+        case "cancelled": return "Cancelled"
+        default: return "Idle"
+        }
+    }
+    property bool beamSettled: false
+    // V3A intentionally exposes no location DTO; never infer a city from connection/IP.
+    readonly property bool showUnknownCityCard: connected && archivePhase === "Connected" && beamSettled
+    onArchivePhaseChanged: if (archivePhase !== "Connected") beamSettled = false
+    // Scene size is independent of the action label and adapts to the home viewport.
+    property real beaconDiameter: 204
+    readonly property bool motionActive: Qt.application.state === Qt.ApplicationActive
+                                        && root.Window.window !== null
+                                        && root.Window.window.visibility !== Window.Minimized
 
-    implicitWidth: 190
-    implicitHeight: 190
-
+    implicitWidth: Math.max(204, beaconDiameter)
+    implicitHeight: beaconDiameter + 16 + label.implicitHeight
     padding: 0
     hoverEnabled: true
-
     text: ConnectionController.connectionStateText
 
     Connections {
         target: ConnectionController
-
         function onPreparingConfig() {
             PageController.showNotificationMessage(qsTr("Unable to disconnect during configuration preparation"))
         }
     }
 
-    QtObject {
-        id: d
-
-        readonly property real ringRadius: (Math.min(root.width, root.height) - 2) / 2
-        readonly property color ringColor: root.connected && !root.inProgress ? AmneziaStyle.color.accentLight
-                                                                               : AmneziaStyle.color.borderEmphasis
-        readonly property int glowMargin: 24
-    }
-
-    background: Item {
-        implicitWidth: 190
-        implicitHeight: 190
-
-        Item {
-            anchors.fill: parent
-
-            opacity: 0.1
-
-            Item {
-                id: diskSource
-
-                anchors.fill: parent
-                anchors.margins: -d.glowMargin
-
-                Shape {
-                    anchors.fill: parent
-
-                    preferredRendererType: Shape.CurveRenderer
-
-                    ShapePath {
-                        fillColor: AmneziaStyle.color.transparent
-                        strokeColor: d.ringColor
-                        strokeWidth: 1
-
-                        PathAngleArc {
-                            centerX: diskSource.width / 2
-                            centerY: diskSource.height / 2
-                            radiusX: d.ringRadius
-                            radiusY: d.ringRadius
-                            startAngle: 0
-                            sweepAngle: 360
-                        }
-                    }
-                }
-            }
-
-            ShadowType {
-                anchors.fill: diskSource
-                z: -1
-
-                source: diskSource
-                color: AmneziaStyle.color.shadowGlow
-                blur: 6
-            }
+    background: Item {}
+    contentItem: Item {
+        MayakBeacon {
+            id: beacon
+            objectName: "mayak-beacon-decoration"
+            anchors.horizontalCenter: parent.horizontalCenter
+            width: root.beaconDiameter
+            height: width
+            phase: root.archivePhase
+            active: root.motionActive
+            reduceMotion: AmneziaStyle.mayakReduceMotion
+            ringOffColor: AmneziaStyle.color.mayakLineStrong
+            scale: root.down ? 0.97 : 1
+            opacity: root.down ? 0.90 : 1
+            Behavior on scale { NumberAnimation { duration: AmneziaStyle.mayakReduceMotion ? 0 : (root.down ? 90 : 120); easing.type: Easing.OutQuad } }
+            Behavior on opacity { NumberAnimation { duration: AmneziaStyle.mayakReduceMotion ? 0 : (root.down ? 90 : 120) } }
         }
-
-        Item {
-            anchors.fill: parent
-
-            RingGlowType {
-                anchors.fill: parent
-                anchors.margins: -d.glowMargin
-
-                color: d.ringColor
-                radius: d.ringRadius
-                startAngle: 100
-                sweepAngle: root.inProgress ? 160 : 360
-            }
-
-            Shape {
-                id: ringSource
-
-                anchors.fill: parent
-                anchors.margins: -d.glowMargin
-
-                preferredRendererType: Shape.CurveRenderer
-
-                ShapePath {
-                    fillColor: AmneziaStyle.color.transparent
-                    strokeColor: d.ringColor
-                    strokeWidth: 2
-                    capStyle: ShapePath.RoundCap
-
-                    PathAngleArc {
-                        centerX: ringSource.width / 2
-                        centerY: ringSource.height / 2
-                        radiusX: d.ringRadius
-                        radiusY: d.ringRadius
-                        startAngle: 100
-                        sweepAngle: root.inProgress ? 160 : 360
-                    }
-                }
-            }
-
-            RotationAnimator on rotation {
-                running: root.inProgress
-                from: 0
-                to: 360
-                loops: Animation.Infinite
-                duration: 1000
-            }
-        }
-
-        FocusRingType {
-            radius: root.width / 2
+        Rectangle {
+            anchors.centerIn: beacon
+            width: beacon.width + 8
+            height: width
+            radius: width / 2
+            color: "transparent"
+            border.width: 2
+            border.color: AmneziaStyle.color.mayakFocus
             visible: root.visualFocus
         }
+        ButtonTextType {
+            id: label
+            objectName: "mayak-main-connect-label"
+            y: root.beaconDiameter + 16
+            width: parent.width
+            height: implicitHeight
+            text: root.text
+            color: AmneziaStyle.color.mayakInk
+            lineHeight: 30 + LanguageUiController.getLineHeightAppend()
+            font.pixelSize: 20
+            font.weight: 700
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            wrapMode: Text.WordWrap
+        }
     }
 
-    contentItem: ButtonTextType {
-        text: root.text
-
-        color: root.connected && !root.inProgress ? AmneziaStyle.color.textAccent : AmneziaStyle.color.textPrimary
-        lineHeight: 30 + LanguageUiController.getLineHeightAppend()
-        font.pixelSize: 20
-        font.weight: 700
-
-        leftPadding: 16
-        rightPadding: 16
-
-        horizontalAlignment: Text.AlignHCenter
-        verticalAlignment: Text.AlignVCenter
+    Connections {
+        target: beacon
+        function onBeamSettled() { root.beamSettled = true }
     }
 
-    HoverHandler {
-        cursorShape: Qt.PointingHandCursor
-    }
-
-    onClicked: {
-        ConnectionController.connectButtonClicked()
-    }
-
+    HoverHandler { cursorShape: Qt.PointingHandCursor }
+    onClicked: ConnectionController.connectButtonClicked()
     Keys.onEnterPressed: root.clicked()
     Keys.onReturnPressed: root.clicked()
 }
