@@ -75,24 +75,20 @@ LanguageSettings::AvailableLanguageEnum LanguageUiController::getSystemLanguageE
     }
 }
 
+// Mayak: the app's website, policy and help links point to the Mayak site, not to Amnezia.
+// No tracking parameters are added.
 QString LanguageUiController::getCurrentSiteUrl(const QString &path) const
 {
-    const QString utm("utm_source=app&utm_campaign=amnezia_hello");
-    auto locale = m_settingsController->getAppLanguage();
-    if (locale.language() == QLocale::Russian) {
-        const QString mirror("https://storage.googleapis.com/amnezia/amnezia.org");
-        return path.isEmpty() ? QString("%1?%2").arg(mirror, utm) : QString("%1?m-path=%2&%3").arg(mirror, path, utm);
-    }
-    return path.isEmpty() ? QString("https://amnezia.org?%1").arg(utm) : QString("https://amnezia.org/%1?%2").arg(path, utm);
+    const QString base("https://mayaklight.ru/");
+    if (path == QLatin1String("policy"))
+        return base + QStringLiteral("privacy/");
+    return base + path;
 }
 
 QString LanguageUiController::getCurrentDocsUrl(const QString &path) const
 {
-    auto locale = m_settingsController->getAppLanguage();
-    if (locale.language() == QLocale::Russian) {
-        return "https://storage.googleapis.com/amnezia/docs" + (path.isEmpty() ? "" : (QString("?m-path=/%1").arg(path)));
-    }
-    return QString("https://docs.amnezia.org") + (path.isEmpty() ? "" : (QString("/%1").arg(path)));
+    Q_UNUSED(path)
+    return QStringLiteral("https://mayaklight.ru/");
 }
 
 QString LanguageUiController::getCurrentHostUrl(const QString &path) const

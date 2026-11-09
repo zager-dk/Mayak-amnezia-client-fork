@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Controls.impl
 import QtQuick.Layouts
 import Style 1.0
 import PageEnum 1.0
@@ -100,6 +101,11 @@ PageType {
     Component.onCompleted: resetWaitFeedback()
     onWaitingPhaseChanged: resetWaitFeedback()
     onCityVisibleChanged: if (!cityVisible) collapseDetails()
+    // The night photo is on screen: Android system bar icons stay light even in the day theme.
+    // By day the photo is under a white veil, so the bars follow the theme there too.
+    readonly property bool darkSceneShown: cityVisible && !AmneziaStyle.mayakDay && root.StackView.status === StackView.Active
+    onDarkSceneShownChanged: AmneziaStyle.mayakDarkScene = darkSceneShown
+    Component.onDestruction: AmneziaStyle.mayakDarkScene = false
     Timer { id: phaseWaitTimer; interval: 10001; repeat: false; onTriggered: root.longWait = root.waitingPhase !== "" && !root.cancelRequested }
     NumberAnimation { id: detailProgressAnimation; target: root; property: "detailsProgress"; easing.type: Easing.OutCubic }
     Connections { target: connectButton; function onClicked() { root.longWait = false; phaseWaitTimer.stop(); if (root.waitingPhase !== "") root.cancelRequested = true } }
@@ -113,6 +119,7 @@ PageType {
         sceneActive: root.cityVisible
         detailsProgress: root.detailsProgress
         reduceMotion: AmneziaStyle.mayakReduceMotion
+        day: AmneziaStyle.mayakDay
         detailsScrollOffset: root.cityDetailsOpen && !AmneziaStyle.mayakReduceMotion ? detailsScroll.contentY * 0.35 : 0
     }
 
@@ -132,7 +139,7 @@ PageType {
                 onClicked: PageController.goToPage(PageEnum.PageSettings)
                 contentItem: RowLayout { spacing: 7
                     Image { Layout.preferredWidth: 32; Layout.preferredHeight: 32; source: "qrc:/images/mayak-mark-round-128.png"; fillMode: Image.PreserveAspectFit; Accessible.ignored: true }
-                    Text { objectName: "mayak-wordmark"; text: "маяк"; color: root.cityVisible ? "#ECEFF6" : AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 21; font.weight: Font.DemiBold }
+                    Text { objectName: "mayak-wordmark"; text: "маяк"; color: root.cityVisible && !AmneziaStyle.mayakDay ? "#ECEFF6" : AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 21; font.weight: Font.DemiBold }
                 }
                 background: Item {}
             }
@@ -144,7 +151,7 @@ PageType {
                 font.pixelSize: 34
                 onClicked: root.collapseDetails()
                 background: Item {}
-                contentItem: Text { text: parent.text; color: root.cityVisible ? "#ECEFF6" : AmneziaStyle.color.mayakInk; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
+                contentItem: Text { text: parent.text; color: root.cityVisible && !AmneziaStyle.mayakDay ? "#ECEFF6" : AmneziaStyle.color.mayakInk; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
             }
             Item { Layout.fillWidth: true }
             // Заметный вход в настройки и аккаунт (вход по почте, устройства, Telegram); логотип слева ведёт туда же.
@@ -153,15 +160,15 @@ PageType {
                 visible: !root.cityDetailsOpen
                 Accessible.name: qsTr("Настройки и аккаунт"); ToolTip.text: Accessible.name; ToolTip.visible: hovered
                 onClicked: PageController.goToPage(PageEnum.PageSettings)
-                background: Rectangle { radius: 14; color: root.cityVisible ? "#A60A0F1C" : parent.visualFocus ? AmneziaStyle.color.mayakSurface1 : "transparent"; border.width: parent.visualFocus ? 2 : 0; border.color: AmneziaStyle.color.mayakFocus }
-                contentItem: Image { objectName: "mayak-settings-svg-icon"; source: AmneziaStyle.mayakDay && !root.cityVisible ? "qrc:/ui/qml/MayakCity/icons/gear-day.svg" : "qrc:/ui/qml/MayakCity/icons/gear.svg"; sourceSize: Qt.size(24, 24); fillMode: Image.PreserveAspectFit; Accessible.ignored: true }
+                background: Rectangle { radius: 14; color: root.cityVisible ? (AmneziaStyle.mayakDay ? "#A6F5F3EE" : "#A60A0F1C") : parent.visualFocus ? AmneziaStyle.color.mayakSurface1 : "transparent"; border.width: parent.visualFocus ? 2 : 0; border.color: AmneziaStyle.color.mayakFocus }
+                contentItem: Image { objectName: "mayak-settings-svg-icon"; source: AmneziaStyle.mayakDay ? "qrc:/ui/qml/MayakCity/icons/gear-day.svg" : "qrc:/ui/qml/MayakCity/icons/gear.svg"; sourceSize: Qt.size(24, 24); fillMode: Image.PreserveAspectFit; Accessible.ignored: true }
             }
             ToolButton {
                 objectName: "mayak-theme-toggle"; Layout.preferredWidth: 48; Layout.preferredHeight: 48
                 Accessible.name: AmneziaStyle.mayakDay ? qsTr("Включить ночную тему") : qsTr("Включить дневную тему")
                 onClicked: AmneziaStyle.mayakDay = !AmneziaStyle.mayakDay
-                background: Rectangle { radius: 14; color: root.cityVisible ? "#A60A0F1C" : parent.visualFocus ? AmneziaStyle.color.mayakSurface1 : "transparent"; border.width: parent.visualFocus ? 2 : 0; border.color: AmneziaStyle.color.mayakFocus }
-                contentItem: Image { objectName: "mayak-theme-svg-icon"; source: AmneziaStyle.mayakDay ? (root.cityVisible ? "qrc:/ui/qml/MayakCity/icons/moon.svg" : "qrc:/ui/qml/MayakCity/icons/moon-day.svg") : "qrc:/ui/qml/MayakCity/icons/sun.svg"; sourceSize: Qt.size(24, 24); fillMode: Image.PreserveAspectFit; Accessible.ignored: true }
+                background: Rectangle { radius: 14; color: root.cityVisible ? (AmneziaStyle.mayakDay ? "#A6F5F3EE" : "#A60A0F1C") : parent.visualFocus ? AmneziaStyle.color.mayakSurface1 : "transparent"; border.width: parent.visualFocus ? 2 : 0; border.color: AmneziaStyle.color.mayakFocus }
+                contentItem: Image { objectName: "mayak-theme-svg-icon"; source: AmneziaStyle.mayakDay ? "qrc:/ui/qml/MayakCity/icons/moon-day.svg" : "qrc:/ui/qml/MayakCity/icons/sun.svg"; sourceSize: Qt.size(24, 24); fillMode: Image.PreserveAspectFit; Accessible.ignored: true }
             }
         }
         Item { objectName: "mayak-hero-spacer"; visible: !root.cityVisible; Layout.preferredHeight: root.heroTopGap; Layout.minimumHeight: 0; Layout.maximumHeight: root.heroTopGap }
@@ -219,6 +226,7 @@ PageType {
                         text: qsTr("Понятно"); Accessible.name: text
                         font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 15
                         onClicked: MayakRouting.markNoticeShown()
+                        contentItem: Text { text: parent.text; font: parent.font; color: AmneziaStyle.color.mayakInk; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap }
                         background: Rectangle { radius: 12; color: noticeButton.down ? AmneziaStyle.color.mayakSurface2 : "transparent"; border.width: noticeButton.visualFocus ? 2 : 0; border.color: AmneziaStyle.color.mayakFocus }
                     }
                 }
@@ -229,6 +237,7 @@ PageType {
                 text: qsTr("Раздельное туннелирование"); Accessible.name: text
                 font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 16
                 onClicked: splitDrawer.open()
+                contentItem: Text { text: parent.text; font: parent.font; color: AmneziaStyle.color.mayakInk; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap }
                 background: Rectangle {
                     radius: 14
                     color: splitButton.down ? AmneziaStyle.color.mayakSurface2 : AmneziaStyle.color.mayakSurface1
@@ -250,6 +259,7 @@ PageType {
             visible: root.waitingPhase !== "" && !root.cancelRequested
             text: qsTr("Отменить"); Accessible.name: text
             font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 16
+            contentItem: Text { text: parent.text; font: parent.font; color: AmneziaStyle.color.mayakInk; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap }
             KeyNavigation.backtab: connectButton
             onClicked: {
                 if (activeFocus) connectButton.forceActiveFocus()
@@ -298,7 +308,10 @@ PageType {
             Text { text: "●  СОЕДИНЕНИЕ ПРОВЕРЕНО"; color: AmneziaStyle.semanticPalette.ok; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
             Text { id: cardTitle; objectName: "mayak-city-title"; Layout.fillWidth: true; text: root.resolvedCity ? root.resolvedCity.title : ""; color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 25; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
             Text { Layout.fillWidth: true; text: root.resolvedCity ? root.resolvedCity.shortText : ""; color: AmneziaStyle.color.mayakInkMuted; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 17; wrapMode: Text.WordWrap }
-            Text { objectName: "mayak-city-gesture-hint"; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: "⌃  Потяните вверх: фото и подробности"; color: AmneziaStyle.mayakDay ? AmneziaStyle.semanticPalette.beamStrong : AmneziaStyle.color.mayakBeam; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 15; font.weight: Font.DemiBold }
+            RowLayout { Layout.fillWidth: true; spacing: 6
+                IconImage { Layout.preferredWidth: 20; Layout.preferredHeight: 20; Layout.alignment: Qt.AlignTop; source: "qrc:/images/controls/chevron-up.svg"; sourceSize: Qt.size(20, 20); color: AmneziaStyle.color.mayakInk; Accessible.ignored: true }
+                Text { objectName: "mayak-city-gesture-hint"; Layout.fillWidth: true; wrapMode: Text.WordWrap; text: qsTr("Потяните вверх: фото и подробности"); color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 15; font.weight: Font.DemiBold }
+            }
         }
         MouseArea {
             objectName: "mayak-city-card-input"
@@ -399,7 +412,7 @@ PageType {
                 Text { objectName: "mayak-details-city-short"; opacity: root.detailsBodyOpacity; Layout.fillWidth: true; text: root.resolvedCity ? root.resolvedCity.shortText : ""; color: AmneziaStyle.color.mayakInkMuted; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 17; wrapMode: Text.WordWrap }
                 Repeater { objectName: "mayak-city-paragraphs"; model: root.resolvedCity ? root.resolvedCity.paragraphs : []; delegate: Text { opacity: root.detailsBodyOpacity; Layout.fillWidth: true; text: modelData; wrapMode: Text.WordWrap; lineHeight: 1.5; color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 16 } }
                 Text { opacity: root.detailsBodyOpacity; text: qsTr("Что посмотреть"); color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 20; font.weight: Font.DemiBold }
-                Repeater { objectName: "mayak-city-sights"; model: root.resolvedCity ? root.resolvedCity.sights : []; delegate: ColumnLayout { opacity: root.detailsBodyOpacity; Layout.fillWidth: true; spacing: 2; Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modelData[0]; color: AmneziaStyle.mayakDay ? AmneziaStyle.semanticPalette.beamStrong : AmneziaStyle.color.mayakBeam; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 16; font.weight: Font.DemiBold } Text { Layout.fillWidth: true; text: modelData[1]; color: AmneziaStyle.color.mayakInkMuted; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 15; wrapMode: Text.WordWrap } } }
+                Repeater { objectName: "mayak-city-sights"; model: root.resolvedCity ? root.resolvedCity.sights : []; delegate: ColumnLayout { opacity: root.detailsBodyOpacity; Layout.fillWidth: true; spacing: 2; Text { Layout.fillWidth: true; wrapMode: Text.WordWrap; text: modelData[0]; color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 16; font.weight: Font.DemiBold } Text { Layout.fillWidth: true; text: modelData[1]; color: AmneziaStyle.color.mayakInkMuted; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 15; wrapMode: Text.WordWrap } } }
                 Text { objectName: "mayak-city-photo-credit"; opacity: root.detailsBodyOpacity; Layout.fillWidth: true; text: root.resolvedCity ? qsTr("Фото: %1, «%2», %3 · %4 (%5). Source: %6.").arg(root.resolvedCity.author).arg(root.resolvedCity.photoTitle).arg(root.resolvedCity.license).arg(root.resolvedCity.licenseUrl).arg(root.resolvedCity.source).arg(root.resolvedCity.sourceUrl) : ""; color: AmneziaStyle.color.mayakInkMuted; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 13; wrapMode: Text.WordWrap }
                 Text { opacity: root.detailsBodyOpacity; Layout.fillWidth: true; text: qsTr("Город выхода показан по данным сервера."); color: AmneziaStyle.color.mayakInkMuted; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 13; wrapMode: Text.WordWrap }
             }
@@ -447,7 +460,7 @@ PageType {
     RowLayout {
         id: connectedRouting; objectName: "mayak-connected-routing"
         width: cityCard.width; x: cityCard.x
-        height: 44
+        height: Math.max(44, connectedRussiaRow.implicitHeight + 8)
         y: cityCard.y - 10 - height
         spacing: 8
         visible: root.cityVisible
@@ -456,8 +469,8 @@ PageType {
         Rectangle {
             Layout.fillWidth: true; Layout.fillHeight: true; radius: 14
             color: AmneziaStyle.color.mayakSurface1; border.width: 1; border.color: AmneziaStyle.color.mayakLine
-            RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 6
-                Text { Layout.fillWidth: true; text: qsTr("Россия напрямую"); elide: Text.ElideRight; color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
+            RowLayout { id: connectedRussiaRow; anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 6
+                Text { Layout.fillWidth: true; text: qsTr("Россия напрямую"); wrapMode: Text.WordWrap; maximumLineCount: 2; color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
                 SwitchType {
                     objectName: "mayak-connected-russia-switch"
                     checked: MayakRouting.russiaDirect
@@ -468,10 +481,11 @@ PageType {
         }
         Button {
             id: connectedSplitButton; objectName: "mayak-connected-split"
-            Layout.fillHeight: true; Layout.preferredWidth: Math.min(170, cityCard.width * 0.42)
-            text: qsTr("Туннелирование"); Accessible.name: qsTr("Раздельное туннелирование, просмотр")
+            Layout.fillHeight: true; Layout.preferredWidth: Math.min(124, cityCard.width * 0.36)
+            text: qsTr("Исключения"); Accessible.name: qsTr("Раздельное туннелирование: исключения")
             font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 14
             onClicked: splitDrawer.open()
+            contentItem: Text { text: parent.text; font: parent.font; color: AmneziaStyle.color.mayakInk; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter; wrapMode: Text.WordWrap }
             background: Rectangle {
                 radius: 14
                 color: connectedSplitButton.down ? AmneziaStyle.color.mayakSurface2 : AmneziaStyle.color.mayakSurface1

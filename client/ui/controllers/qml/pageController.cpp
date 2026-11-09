@@ -91,17 +91,23 @@ void PageController::hideWindow()
 
 unsigned int PageController::getInitialPageNavigationBarColor()
 {
-    if (m_serversController->getServersCount()) {
-        return 0xFF1F1F23;
-    } else {
-        return 0xFF101012;
-    }
+    // Mayak night surface-0; QML switches it to the day surface when the day theme is on.
+    return 0xFF0A0F1C;
 }
 
 void PageController::updateNavigationBarColor(const int color)
 {
 #ifdef Q_OS_ANDROID
     AndroidController::instance()->setNavigationBarColor(color);
+#endif
+}
+
+void PageController::updateSystemBarsAppearance(bool light)
+{
+#ifdef Q_OS_ANDROID
+    AndroidController::instance()->setLightSystemBars(light);
+#else
+    Q_UNUSED(light)
 #endif
 }
 

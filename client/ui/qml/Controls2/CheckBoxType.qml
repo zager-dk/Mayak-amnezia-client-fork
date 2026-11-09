@@ -52,7 +52,7 @@ CheckBox {
 
             color: AmneziaStyle.color.transparent
             border.width: 1
-            border.color: root.checked ? AmneziaStyle.color.accentDark : AmneziaStyle.color.borderBold
+            border.color: root.checked ? AmneziaStyle.color.mayakInk : AmneziaStyle.color.borderBold
 
             Behavior on border.color {
                 ColorAnimation { duration: 150 }
@@ -70,7 +70,7 @@ CheckBox {
             visible: root.checked
             source: "qrc:/images/controls/check.svg"
             sourceSize: Qt.size(24, 24)
-            color: AmneziaStyle.color.accentLight
+            color: AmneziaStyle.color.mayakInk
         }
 
         FocusRingType {

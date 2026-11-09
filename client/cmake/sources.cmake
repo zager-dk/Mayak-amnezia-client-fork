@@ -221,6 +221,8 @@ set(COMMON_FILES_CPP
     ${CLIENT_ROOT_DIR}/core/controllers/mayakAutoConnectCoordinator.cpp
     ${CLIENT_ROOT_DIR}/core/controllers/mayakAttemptStore.h
     ${CLIENT_ROOT_DIR}/core/controllers/mayakAttemptStore.cpp
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakForeignVpn.h
+    ${CLIENT_ROOT_DIR}/core/controllers/mayakForeignVpn.cpp
     ${CLIENT_ROOT_DIR}/core/controllers/api/mayakAdmissionClient.h
     ${CLIENT_ROOT_DIR}/core/controllers/api/mayakAdmissionClient.cpp
     ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelProbe.h

@@ -1,5 +1,7 @@
 #include "connectionUiController.h"
 
+#include <QTimer>
+
 #if defined(Q_OS_ANDROID) || defined(Q_OS_IOS) || defined(MACOS_NE)
     #include <QGuiApplication>
 #else
@@ -8,6 +10,7 @@
 
 #include "amneziaApplication.h"
 #include "core/controllers/serversController.h"
+#include "core/controllers/mayakForeignVpn.h"
 #include "core/models/containerConfig.h"
 #include "core/utils/containerEnum.h"
 
@@ -161,7 +164,22 @@ void ConnectionUiController::toggleConnection()
             return;
         }
 
-        if (m_connectionController->isMayakManaged(serverId)) { openConnection(); return; }
+        if (m_connectionController->isMayakManaged(serverId)) {
+            if (m_foreignStopInFlight) return;
+            // Windows lets several VPNs run at once; a second tunnel that captures all traffic
+            // can keep Mayak from connecting. Ask the user first (Mayak never stops it silently).
+            const auto foreign = mayak::foreignvpn::detect();
+            if (foreign.found()) {
+                m_foreignProgram = foreign.program;
+                qInfo().noquote() << QStringLiteral("MayakNet event=foreign_vpn_detected known=%1 stoppable=%2")
+                                         .arg(foreign.program == QLatin1String("Browsec") ? "browsec" : "other")
+                                         .arg(foreign.stoppable ? 1 : 0);
+                emit foreignVpnDetected(foreign.program, foreign.stoppable);
+                return;
+            }
+            openConnection();
+            return;
+        }
         const ErrorCode errorCode = m_connectionController->isConnectionSupported(serverId);
         if (errorCode != ErrorCode::NoError) {
             notifyConnectionBlocked(errorCode);
@@ -170,6 +188,36 @@ void ConnectionUiController::toggleConnection()
 
         emit prepareConfig();
     }
+}
+
+void ConnectionUiController::connectDespiteForeignVpn()
+{
+    if (m_foreignStopInFlight || isConnected() || isConnectionInProgress()) return;
+    qInfo().noquote() << QStringLiteral("MayakNet event=foreign_vpn_ignored");
+    openConnection();
+}
+
+void ConnectionUiController::stopForeignVpnAndConnect()
+{
+    if (m_foreignStopInFlight || isConnected() || isConnectionInProgress()) return;
+    m_foreignStopInFlight = true;
+    const QString program = m_foreignProgram;
+    mayak::foreignvpn::requestStop(this, [this, program](bool replied, int stopped) {
+        qInfo().noquote() << QStringLiteral("MayakNet event=foreign_vpn_stop_reply replied=%1 stopped=%2")
+                                 .arg(replied ? 1 : 0).arg(stopped);
+        // The tunnel adapter disappears shortly after its core exits; then look again.
+        QTimer::singleShot(replied && stopped > 0 ? 1500 : 0, this, [this, program] {
+            m_foreignStopInFlight = false;
+            const auto still = mayak::foreignvpn::detect();
+            qInfo().noquote() << QStringLiteral("MayakNet event=foreign_vpn_after_stop present=%1")
+                                     .arg(still.found() ? 1 : 0);
+            if (still.found()) {
+                emit foreignVpnStopFailed(program);
+                return;
+            }
+            openConnection();
+        });
+    });
 }
 
 void ConnectionUiController::notifyConnectionBlocked(ErrorCode errorCode)

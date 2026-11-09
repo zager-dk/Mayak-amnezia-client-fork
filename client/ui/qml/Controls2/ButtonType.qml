@@ -39,8 +39,9 @@ Button {
         readonly property bool active: root.down || root.hovered
         readonly property bool pressedRing: root.down && root.variant === ButtonType.Primary && root.size === ButtonType.Large
 
-        readonly property int height: root.size === ButtonType.Large ? 48 : (root.size === ButtonType.Medium ? 40 : 36)
-        readonly property int radius: small && !textVariant ? 12 : (root.size === ButtonType.Medium && !textVariant ? 14 : 16)
+        // Mayak design system: touch target >= 44 px, button radius 10.
+        readonly property int height: root.size === ButtonType.Large ? 48 : 44
+        readonly property int radius: 10
         readonly property int iconSize: small || (textVariant && root.size === ButtonType.Medium) ? 20 : 24
         readonly property int gap: root.size === ButtonType.Large || textVariant ? 4 : 2
 

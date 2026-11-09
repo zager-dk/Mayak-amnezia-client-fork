@@ -38,6 +38,10 @@ MayakAutoConnectRuntime::RecoveryTiming& recoveryTimingStorage() {
 // working, or never answered a handshake while connecting, is tried last for a while.
 struct AvoidedExit { QString candidateId; qint64 until = 0; int knownExits = 0; };
 AvoidedExit& avoidedExitStorage() { static AvoidedExit avoided; return avoided; }
+// Local adapter failure retries survive the automatic session restart below (bounded across
+// sessions); a user-started connect or a confirmed connection resets them.
+struct LocalStartRetries { int count = 0; bool autoRestart = false; };
+LocalStartRetries& localStartRetriesStorage() { static LocalStartRetries retries; return retries; }
 constexpr qint64 kAvoidExitMs = 10 * 60 * 1000;
 qint64 utcDeadline(qint64 mono) { return QDateTime::currentMSecsSinceEpoch() + qMax<qint64>(0, mono-B::monotonicMillis()); }
 QJsonObject payloadFor(const at::AttemptRecord& r) {
@@ -107,6 +111,10 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     // The local tunnel adapter did not come up in this cycle (RecoveryTiming::noHealthMeansLocalFailure).
     bool localStartFailed = false;
     int localStartRetries = 0;
+    // Windows was still busy failing the adapter when the 3 s stop expired: confirm the stop
+    // later (exact cleanup) and then start a fresh session.
+    qint64 localRestartAt = 0;
+    bool restartAfterCleanup = false;
     // Connected-state truth for the UI (rule: never "Connected" without a passing
     // tunnel probe) and Android soft recovery of a stuck AWG transport.
     struct Recovery {
@@ -187,6 +195,10 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         : facade(f), servers(f->m_servers), app(f->m_app), connection(f->m_connection),
           subscription(f->m_subscription), transport(f->m_transport), store(new at::MayakAttemptStore(f->m_settings)),
           bridge(new B(f->m_port)), serverId(std::move(id)), epoch(randomId()), cycleToken(randomId()) {
+        auto& retries=localStartRetriesStorage();
+        if (!retries.autoRestart) retries.count=0;
+        retries.autoRestart=false;
+        localStartRetries=retries.count;
         if (app) connect(app, &SecureAppSettingsRepository::mayakSessionChanging, this, [this] {
             if (permissionPending) stopUser();
         });
@@ -220,6 +232,12 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                     logNet(QStringLiteral("event=connect_retry_blocked"));
                     output(Vpn::ConnectionState::Error,errorText(ac::ErrorCategory::Network));
                 }
+            }
+            // Local adapter failure with an unconfirmed stop: confirm and release now, then restart.
+            if (localRestartAt && now()>=localRestartAt && cleanupPending && !cleanupOperation && !cancelled) {
+                localRestartAt=0;
+                logNet(QStringLiteral("event=local_start_cleanup retry=%1").arg(localStartRetries));
+                retryCleanup();
             }
             for (auto& [tag,a]:attempts) {
                 if (a->proofDone) advanceProof(tag,a);
@@ -372,6 +390,21 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         abandonHeldDisconnect=false;
         cleanupPending=false; cleanupOperation=false; cancelled=true;
         preparing=false; terminal=true; reconnectWanted=false; timer.stop();
+        if (restartAfterCleanup && facade) {
+            // The local adapter attempt is fully stopped and released: start a fresh session
+            // (preflight + reconcile + new cycle) that keeps the bounded retry count.
+            restartAfterCleanup=false;
+            phase=QStringLiteral("preparing");
+            localStartRetriesStorage().count=localStartRetries;
+            logNet(QStringLiteral("event=local_start_restart retry=%1").arg(localStartRetries));
+            QTimer::singleShot(0,facade.data(),[f=facade,id=serverId] {
+                if (!f) return;
+                localStartRetriesStorage().autoRestart=true;
+                f->begin(id);
+                localStartRetriesStorage().autoRestart=false;
+            });
+            return true;
+        }
         phase=QStringLiteral("cancelled"); output(Vpn::ConnectionState::Disconnected,{});
         return true;
     }
@@ -570,7 +603,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 const bool networkLost=rec.networkLost;
                 rec={}; rec.networkLost=networkLost; rec.networkLostAt=networkLost ? now() : 0;
                 connectRetries=0; connectRetryAt=0; abandonUnconfirmed=false;
-                localStartFailed=false; localStartRetries=0;
+                localStartFailed=false; localStartRetries=0; localStartRetriesStorage().count=0;
                 connectedLocation=location;
                 output(Vpn::ConnectionState::Connected,QStringLiteral("Подключено"),location);
             } break;
@@ -578,8 +611,23 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…")); break;
         case ac::State::Failed:
             terminal=true;
-            if (s.error==ac::ErrorCategory::StopUnconfirmed) {
+            if (s.error==ac::ErrorCategory::StopUnconfirmed && localStartFailed && !cancelled && !reconnectWanted &&
+                localStartRetries<recoveryTimingStorage().localStartRetryMs.size()) {
+                // Windows is still failing the adapter (~16 s) so the 3 s stop could not be confirmed.
+                // Not a user-facing cleanup error: confirm the stop after a pause, then restart.
+                localStartFailed=false; cleanupPending=true; restartAfterCleanup=true; terminal=false;
+                const qint64 delay=recoveryTimingStorage().localStartRetryMs.at(localStartRetries++);
+                localRestartAt=now()+delay;
+                phase=QStringLiteral("preparing");
+                output(Vpn::ConnectionState::Preparing,
+                       QStringLiteral("VPN-адаптер Windows не запустился — повторим через %1 с…").arg((delay+999)/1000));
+                logNet(QStringLiteral("event=local_start_retry_scheduled retry=%1 delay_ms=%2 stop=unconfirmed").arg(localStartRetries).arg(delay));
+            } else if (s.error==ac::ErrorCategory::StopUnconfirmed) {
                 cleanupPending=true;
+                if (localStartFailed && !cancelled) {
+                    localStartFailed=false;
+                    logNet(QStringLiteral("event=local_start_retry_exhausted stop=unconfirmed"));
+                }
                 output(Vpn::ConnectionState::Error,cleanupText());
             } else if (abandonUnconfirmed && !cancelled) {
                 // Note 7: the adopted backend's stop was not confirmed. Not a network problem and
@@ -638,6 +686,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         }
         for(auto& [tag,a]:attempts) { a->cancelled=true; if(a->ticket.valid()) bridge->cancel(a->ticket); }
         const bool retryWaiting=connectRetryAt!=0; connectRetryAt=0;
+        const bool localRestartWaiting=restartAfterCleanup; localRestartAt=0; restartAfterCleanup=false;
         const bool adopting=adoption.pending;
         if (adopting) {
             // The adopted backend is not yet owned by any attempt: stop it with the recovery
@@ -656,6 +705,12 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             // reconnect is ours to end.
             if ((retryWaiting || reconnectWaiting) && coordinator->status().state==ac::State::Failed) {
                 terminal=true; phase=QStringLiteral("cancelled"); output(Vpn::ConnectionState::Disconnected,{});
+            } else if (localRestartWaiting && cleanupPending && !cleanupOperation) {
+                // The user's OFF during the local-adapter pause: no restart, finish the pending
+                // exact cleanup now (Disconnected on success, the cleanup error otherwise).
+                terminal=true; phase=QStringLiteral("stopping");
+                output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…"));
+                retryCleanup();
             }
         } else {
             preparing=false; terminal=true;
@@ -668,6 +723,15 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 output(Vpn::ConnectionState::Error,errorText(ac::ErrorCategory::StopUnconfirmed));
             }
         }
+    }
+    // The user pressed the main button («Повторить отключение») while a local-adapter restart was
+    // pending: the user wants OFF, so the cleanup must not end in an automatic new connection.
+    void userRetryCleanup() {
+        if (restartAfterCleanup || localRestartAt) {
+            restartAfterCleanup=false; localRestartAt=0;
+            logNet(QStringLiteral("event=local_start_restart_cancelled reason=user"));
+        }
+        retryCleanup();
     }
     void retryCleanup(bool continuation=false) {
         if (!cleanupPending || cleanupOperation || !facade) return;
@@ -1306,7 +1370,7 @@ void MayakAutoConnectRuntime::begin(const QString& id) {
 }
 void MayakAutoConnectRuntime::cancel() { if(m_session) m_session->stopUser(); }
 bool MayakAutoConnectRuntime::cleanupPending() const { return m_session && m_session->cleanupPending; }
-void MayakAutoConnectRuntime::retryCleanup() { if(m_session) m_session->retryCleanup(); }
+void MayakAutoConnectRuntime::retryCleanup() { if(m_session) m_session->userRetryCleanup(); }
 void MayakAutoConnectRuntime::shutdown() {
     cancel();
     QElapsedTimer elapsed; elapsed.start();

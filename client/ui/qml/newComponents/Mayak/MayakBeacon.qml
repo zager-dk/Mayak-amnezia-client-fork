@@ -3,6 +3,7 @@
 import QtQuick
 import QtQuick.Shapes
 import QtQuick.Effects
+import QtQuick.Window
 
 Item {
     id: root
@@ -15,8 +16,12 @@ Item {
     property bool reduceMotion: false
     // false, когда окно свёрнуто или приложение в фоне: вращение на паузе, угол сохраняется
     property bool active: true
-    property url skySource: "assets/f7-layer-sky.svg"
-    property url landTowerSource: "assets/f7-layer-land-tower.svg"
+    // Day theme: the same scene as a black-and-white inversion; amber stays amber.
+    property bool day: false
+    property url skySource: day ? "assets/f7-layer-sky-day.svg" : "assets/f7-layer-sky.svg"
+    property url landTowerSource: day ? "assets/f7-layer-land-tower-day.svg" : "assets/f7-layer-land-tower.svg"
+    // Layers are rendered at the real on-screen pixel size (no upscaled textures).
+    readonly property size layerPixels: Qt.size(Math.ceil(width * Screen.devicePixelRatio), Math.ceil(height * Screen.devicePixelRatio))
 
     // ---- выходы ----
     // Луч встал вправо после Connected: можно показывать фото города и карточку.
@@ -165,7 +170,7 @@ Item {
     }
 
     // ---- цвета ----
-    readonly property color rimOff: "#9cc2ff"
+    readonly property color rimOff: day ? "#565e70" : "#9cc2ff"   // day: ink-muted, same as the checked switch
     readonly property color rimOn: "#ffc54d"
     readonly property color danger: "#ff7b7b"
     readonly property color warn: "#f7a35e"
@@ -226,6 +231,9 @@ Item {
         id: sceneWrap
         anchors.fill: parent
         layer.enabled: true
+        layer.textureSize: root.layerPixels
+        layer.samples: 4            // MSAA: smooth tower contour and beam edges
+        layer.smooth: true
         visible: false
 
         Item {
@@ -238,7 +246,7 @@ Item {
 
             // лучи за башней: дымка (сильное размытие) и ядро (слабое)
             Item {
-                id: hazeBack; anchors.fill: parent; layer.enabled: true; visible: false
+                id: hazeBack; anchors.fill: parent; layer.enabled: true; layer.textureSize: root.layerPixels; layer.smooth: true; visible: false
                 BeamShape { th: root.theta; len: root.beamLen; alpha: root.intensity(root.theta, root.lit) * (1 - root.frontShare(root.theta)) * 0.6 }
                 BeamShape { th: root.theta + Math.PI; len: root.beamLen * 0.75; alpha: root.intensity(root.theta + Math.PI, root.lit * 0.2) * (1 - root.frontShare(root.theta + Math.PI)) * 0.6 }
                 BeamShape { th: root.theta - root.dir * 0.26; len: root.beamLen * 0.95; alpha: root.intensity(root.theta, root.lit) * root.trail * 0.45 }
@@ -246,7 +254,7 @@ Item {
             }
             MultiEffect { source: hazeBack; anchors.fill: hazeBack; blurEnabled: true; blur: 1.0; blurMax: 20 }
             Item {
-                id: coreBack; anchors.fill: parent; layer.enabled: true; visible: false
+                id: coreBack; anchors.fill: parent; layer.enabled: true; layer.textureSize: root.layerPixels; layer.smooth: true; visible: false
                 BeamShape { core: true; th: root.theta; len: root.beamLen; alpha: root.intensity(root.theta, root.lit) * (1 - root.frontShare(root.theta)) * 0.6 * 0.85 }
             }
             MultiEffect { source: coreBack; anchors.fill: coreBack; blurEnabled: true; blur: 0.35; blurMax: 8 }
@@ -260,9 +268,9 @@ Item {
                 id: lantern
                 x: 109; y: 64; width: 18; height: 19; radius: 2; clip: true
                 color: root.flash > 0.05 ? root.mix(Qt.color("#ffd27a"), Qt.color("#fff6dc"), root.flash * 0.8)
-                                         : root.mix(Qt.color("#1a2034"), Qt.color("#ffd27a"), root.clamp01(root.lit))
-                Rectangle { x: 6; width: 1.4; height: parent.height; color: root.mix(Qt.color("#0a0f1c"), Qt.color("#d99a22"), root.clamp01(root.lit)) }
-                Rectangle { x: 12; width: 1.4; height: parent.height; color: root.mix(Qt.color("#0a0f1c"), Qt.color("#d99a22"), root.clamp01(root.lit)) }
+                                         : root.mix(Qt.color(root.day ? "#dde2ea" : "#1a2034"), Qt.color("#ffd27a"), root.clamp01(root.lit))
+                Rectangle { x: 6; width: 1.4; height: parent.height; color: root.mix(Qt.color(root.day ? "#a6aebd" : "#0a0f1c"), Qt.color("#d99a22"), root.clamp01(root.lit)) }
+                Rectangle { x: 12; width: 1.4; height: parent.height; color: root.mix(Qt.color(root.day ? "#a6aebd" : "#0a0f1c"), Qt.color("#d99a22"), root.clamp01(root.lit)) }
                 // блик вращающейся линзы
                 Rectangle { x: 7 + 7 * Math.cos(root.theta); width: 4; height: parent.height; color: "#fff6dc"
                             opacity: root.reduceMotion ? 0 : root.lit * Math.max(0, Math.sin(root.theta)) * 0.9 }
@@ -270,9 +278,10 @@ Item {
                             opacity: root.reduceMotion ? 0 : root.lit * 0.5 * Math.max(0, Math.sin(root.theta + Math.PI)) * 0.9 }
             }
 
-            // контур: голубой без света, тёплый когда горит
+            // контур: голубой без света, тёплый когда горит (днём — тёмный тёплый серый)
             Shape {
                 anchors.fill: parent
+                preferredRendererType: Shape.CurveRenderer
                 ShapePath {
                     strokeColor: root.rimColor; strokeWidth: 2.2; fillColor: "transparent"
                     capStyle: ShapePath.RoundCap; joinStyle: ShapePath.RoundJoin
@@ -287,13 +296,13 @@ Item {
 
             // лучи перед башней
             Item {
-                id: hazeFront; anchors.fill: parent; layer.enabled: true; visible: false
+                id: hazeFront; anchors.fill: parent; layer.enabled: true; layer.textureSize: root.layerPixels; layer.smooth: true; visible: false
                 BeamShape { th: root.theta; len: root.beamLen; alpha: root.intensity(root.theta, root.lit) * root.frontShare(root.theta) }
                 BeamShape { th: root.theta + Math.PI; len: root.beamLen * 0.75; alpha: root.intensity(root.theta + Math.PI, root.lit * 0.2) * root.frontShare(root.theta + Math.PI) }
             }
             MultiEffect { source: hazeFront; anchors.fill: hazeFront; blurEnabled: true; blur: 1.0; blurMax: 20 }
             Item {
-                id: coreFront; anchors.fill: parent; layer.enabled: true; visible: false
+                id: coreFront; anchors.fill: parent; layer.enabled: true; layer.textureSize: root.layerPixels; layer.smooth: true; visible: false
                 BeamShape { core: true; th: root.theta; len: root.beamLen; alpha: root.intensity(root.theta, root.lit) * root.frontShare(root.theta) * 0.85 }
             }
             MultiEffect { source: coreFront; anchors.fill: coreFront; blurEnabled: true; blur: 0.35; blurMax: 8 }
@@ -315,12 +324,15 @@ Item {
     }
 
     // круглая маска сцены
-    Rectangle { id: discMask; anchors.fill: parent; radius: width / 2; visible: false; layer.enabled: true }
-    MultiEffect { source: sceneWrap; anchors.fill: parent; maskEnabled: true; maskSource: discMask }
+    Rectangle { id: discMask; anchors.fill: parent; radius: width / 2; visible: false; antialiasing: true
+                layer.enabled: true; layer.textureSize: root.layerPixels; layer.smooth: true }
+    // Soft threshold: the antialiased mask edge stays antialiased (no stair-stepping on the circle).
+    MultiEffect { source: sceneWrap; anchors.fill: parent; maskEnabled: true; maskSource: discMask
+                  maskThresholdMin: 0.5; maskSpreadAtMin: 1.0 }
 
     // кольцо кнопки
     Rectangle {
-        anchors.fill: parent; radius: width / 2; color: "transparent"
+        anchors.fill: parent; radius: width / 2; color: "transparent"; antialiasing: true
         border.width: Math.max(1, 1.5 * root.width / 240); border.color: root.ringColor
     }
 }

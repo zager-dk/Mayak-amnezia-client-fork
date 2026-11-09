@@ -41,6 +41,14 @@ add_executable(test_mayak_device_key testMayakDeviceKey.cpp)
 target_link_libraries(test_mayak_device_key PRIVATE Qt6::Test test_common)
 add_test(NAME MayakDeviceKeyTest COMMAND test_mayak_device_key)
 
+add_executable(test_mayak_foreign_vpn testMayakForeignVpn.cpp)
+if(WIN32)
+    target_sources(test_mayak_foreign_vpn PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/../../platforms/windows/daemon/mayakforeignvpnstop.cpp)
+endif()
+target_link_libraries(test_mayak_foreign_vpn PRIVATE Qt6::Test test_common)
+add_test(NAME MayakForeignVpnTest COMMAND test_mayak_foreign_vpn)
+
 add_executable(test_mayak_permission_preflight testMayakPermissionPreflight.cpp)
 target_link_libraries(test_mayak_permission_preflight PRIVATE Qt6::Test test_common)
 add_test(NAME MayakPermissionPreflightTest COMMAND test_mayak_permission_preflight)

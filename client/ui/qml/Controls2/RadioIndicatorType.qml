@@ -17,21 +17,14 @@ Item {
         radius: width / 2
         color: root.checked ? AmneziaStyle.color.bgBase : AmneziaStyle.color.transparent
         border.width: 1
-        border.color: root.checked ? AmneziaStyle.color.accentDark : AmneziaStyle.color.iconDefault
+        border.color: root.checked ? AmneziaStyle.color.mayakInk : AmneziaStyle.color.mayakLineStrong
 
         Behavior on border.color {
             ColorAnimation { duration: 150 }
         }
     }
 
-    SelectionGlowType {
-        anchors.fill: parent
-
-        source: dot
-        visible: root.checked
-        color: AmneziaStyle.color.accentLight
-    }
-
+    // Mayak design system: selection is neutral (ink), no amber and no glow.
     Rectangle {
         id: dot
 
@@ -40,7 +33,7 @@ Item {
         height: 12
 
         radius: 6
-        color: AmneziaStyle.color.accentLight
+        color: AmneziaStyle.color.mayakInk
         visible: root.checked
     }
 }

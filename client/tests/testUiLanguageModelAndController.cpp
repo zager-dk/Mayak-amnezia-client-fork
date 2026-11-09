@@ -73,8 +73,13 @@ private slots:
         QString siteEN = m_coreController->m_languageUiController->getCurrentSiteUrl("test_path");
         QString docsEN = m_coreController->m_languageUiController->getCurrentDocsUrl("test_path");
 
-        QVERIFY2(siteRU != siteEN, "site url's should not be same");
-        QVERIFY2(docsRU != docsEN, "docs url's should not be same");
+        // Mayak: one site for every language, no Amnezia links.
+        QCOMPARE(siteRU, QStringLiteral("https://mayaklight.ru/test_path"));
+        QCOMPARE(siteEN, siteRU);
+        QCOMPARE(docsRU, QStringLiteral("https://mayaklight.ru/"));
+        QCOMPARE(docsEN, docsRU);
+        QCOMPARE(m_coreController->m_languageUiController->getCurrentSiteUrl("policy"),
+                 QStringLiteral("https://mayaklight.ru/privacy/"));
     }
 
     void testLineHeight()

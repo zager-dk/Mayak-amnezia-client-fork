@@ -29,7 +29,7 @@ Button {
     QtObject {
         id: d
 
-        readonly property int box: root.size === IconButtonType.Small ? 36 : 48
+        readonly property int box: root.size === IconButtonType.Small ? 44 : 48
         readonly property int iconSize: root.size === IconButtonType.Small ? 20 : 24
     }
 

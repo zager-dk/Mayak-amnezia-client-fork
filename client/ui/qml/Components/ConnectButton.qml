@@ -70,7 +70,9 @@ Button {
             phase: root.archivePhase
             active: root.motionActive
             reduceMotion: AmneziaStyle.mayakReduceMotion
-            ringOffColor: AmneziaStyle.color.mayakLineStrong
+            day: AmneziaStyle.mayakDay
+            // Day beacon is cool grey, so its idle ring is a cool grey too.
+            ringOffColor: AmneziaStyle.mayakDay ? "#98a0b1" : AmneziaStyle.color.mayakLineStrong
             scale: root.down ? 0.97 : 1
             opacity: root.down ? 0.90 : 1
             Behavior on scale { NumberAnimation { duration: AmneziaStyle.mayakReduceMotion ? 0 : (root.down ? 90 : 120); easing.type: Easing.OutQuad } }
@@ -93,9 +95,9 @@ Button {
             width: parent.width
             height: implicitHeight
             text: root.text
-            color: root.citySceneActive ? "#ECEFF6" : AmneziaStyle.color.mayakInk
+            color: root.citySceneActive && !AmneziaStyle.mayakDay ? "#ECEFF6" : AmneziaStyle.color.mayakInk
             style: root.citySceneActive ? Text.Outline : Text.Normal
-            styleColor: "#99070C18"
+            styleColor: AmneziaStyle.mayakDay ? "#99F5F3EE" : "#99070C18"
             lineHeight: 30 + LanguageUiController.getLineHeightAppend()
             font.pixelSize: 20
             font.weight: 700

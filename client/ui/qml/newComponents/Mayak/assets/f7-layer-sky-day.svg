@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 240" width="240" height="240">
+  <defs>
+    <clipPath id="f7-disc"><circle cx="120" cy="120" r="120"/></clipPath>
+    <clipPath id="f7-tw"><polygon points="104,156 110.5,88 125.5,88 132,156"/></clipPath>
+    <linearGradient id="f7-sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#959daf"/><stop offset=".38" stop-color="#c3c9d4"/><stop offset=".74" stop-color="#edf0f5"/><stop offset=".741" stop-color="#d8dde6"/><stop offset="1" stop-color="#b1b8c6"/></linearGradient>
+    <linearGradient id="f7-beam" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffd27a" stop-opacity=".8"/><stop offset=".55" stop-color="#ffc54d" stop-opacity=".22"/><stop offset="1" stop-color="#ffc54d" stop-opacity="0"/></linearGradient>
+    <linearGradient id="f7-core" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#fff0c8" stop-opacity=".95"/><stop offset="1" stop-color="#ffd27a" stop-opacity="0"/></linearGradient>
+    <radialGradient id="f7-glow" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#ffd27a" stop-opacity=".75"/><stop offset=".35" stop-color="#ffc54d" stop-opacity=".22"/><stop offset="1" stop-color="#ffc54d" stop-opacity="0"/></radialGradient>
+    <linearGradient id="f7-skysm" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#959daf"/><stop offset=".72" stop-color="#edf0f5"/></linearGradient>
+    <filter id="f7-haze" x="-20%" y="-60%" width="140%" height="220%"><feGaussianBlur stdDeviation="5"/></filter>
+    <filter id="f7-soft" x="-20%" y="-60%" width="140%" height="220%"><feGaussianBlur stdDeviation="1.6"/></filter>
+    <symbol id="f7-scene" viewBox="0 0 240 240">
+      <rect width="240" height="240" fill="url(#f7-sky)"/>
+      <g fill="#ffffff"><circle cx="40" cy="46" r=".8" opacity=".6"/><circle cx="72" cy="26" r="1" opacity=".5"/><circle cx="170" cy="30" r=".8" opacity=".5"/><circle cx="205" cy="70" r="1" opacity=".4"/><circle cx="48" cy="98" r=".7" opacity=".45"/><circle cx="150" cy="16" r=".7" opacity=".5"/><circle cx="26" cy="140" r=".8" opacity=".35"/><circle cx="92" cy="58" r=".6" opacity=".4"/></g>
+      <path d="M150 178 Q180 170 214 174 Q228 172 240 176 L240 178 Z" fill="#bac0cc"/>
+    </symbol>
+    <symbol id="f7-land" viewBox="0 0 240 240">
+      <path d="M0 178 L0 162 Q24 152 44 158 Q62 146 84 152 L148 154 Q168 160 184 178 Z" fill="#a1a9b8"/>
+      <rect x="0" y="177.5" width="240" height="1" fill="#8f97a8"/>
+    </symbol>
+    <symbol id="f7-tower" viewBox="0 0 240 240">
+      <polygon points="104,156 110.5,88 125.5,88 132,156" fill="#f7f9fc"/>
+      <g clip-path="url(#f7-tw)" fill="#dbe0e8"><rect x="96" y="104" width="44" height="9"/><rect x="96" y="127" width="44" height="9"/></g>
+      <rect x="103" y="83" width="30" height="5" rx="1.5" fill="#f7f9fc"/>
+      <path d="M106 64 A12 10 0 0 1 130 64 Z" fill="#f7f9fc"/>
+      <rect x="117" y="48" width="2" height="9" fill="#f7f9fc"/>
+      <circle cx="118" cy="48" r="2" fill="#f7f9fc"/>
+    </symbol>
+  </defs>
+
+      <rect width="240" height="240" fill="url(#f7-sky)"/>
+      <g fill="#ffffff"><circle cx="40" cy="46" r=".8" opacity=".6"/><circle cx="72" cy="26" r="1" opacity=".5"/><circle cx="170" cy="30" r=".8" opacity=".5"/><circle cx="205" cy="70" r="1" opacity=".4"/><circle cx="48" cy="98" r=".7" opacity=".45"/><circle cx="150" cy="16" r=".7" opacity=".5"/><circle cx="26" cy="140" r=".8" opacity=".35"/><circle cx="92" cy="58" r=".6" opacity=".4"/></g>
+      <path d="M150 178 Q180 170 214 174 Q228 172 240 176 L240 178 Z" fill="#bac0cc"/>
+    
+</svg>

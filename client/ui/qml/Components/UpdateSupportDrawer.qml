@@ -32,38 +32,8 @@ SheetType {
                 Layout.rightMargin: 16
                 Layout.bottomMargin: 32
 
-                headerText: qsTr("Support")
-                descriptionText: qsTr("If the update won't install, message us")
-            }
-
-            ListItemType {
-                Layout.fillWidth: true
-                Layout.leftMargin: 16
-                Layout.rightMargin: 16
-
-                text: qsTr("Telegram")
-                subtitle: qsTr("We'll reply in chat")
-                icon.source: "qrc:/images/controls/telegram.svg"
-                trailingIconSource: "qrc:/images/controls/chevron-right.svg"
-
-                onClicked: {
-                    Qt.openUrlExternally(qsTr("https://t.me/amnezia_vpn_en"))
-                }
-            }
-
-            ListItemType {
-                Layout.fillWidth: true
-                Layout.leftMargin: 16
-                Layout.rightMargin: 16
-
-                text: qsTr("support@amnezia.org")
-                subtitle: qsTr("Support email")
-                icon.source: "qrc:/images/controls/mail.svg"
-                trailingIconSource: "qrc:/images/controls/chevron-right.svg"
-
-                onClicked: {
-                    Qt.openUrlExternally(qsTr("mailto:support@amnezia.org"))
-                }
+                headerText: qsTr("Помощь с обновлением")
+                descriptionText: qsTr("Если обновление не устанавливается, скачайте новую версию на сайте Маяка и установите её поверх.")
             }
 
             ListItemType {
@@ -72,10 +42,10 @@ SheetType {
                 Layout.rightMargin: 16
 
                 showSeparator: false
-                text: qsTr("amnezia.org")
-                subtitle: qsTr("Download the update manually")
-                icon.source: "qrc:/images/controls/amnezia.svg"
-                trailingIconSource: "qrc:/images/controls/chevron-right.svg"
+                text: qsTr("Сайт Маяка")
+                subtitle: qsTr("mayaklight.ru · скачать вручную")
+                icon.source: "qrc:/images/controls/globe-2.svg"
+                trailingIconSource: "qrc:/images/controls/external-link.svg"
 
                 onClicked: {
                     Qt.openUrlExternally(LanguageUiController.getCurrentSiteUrl(""))

@@ -27,6 +27,8 @@
         <file>newComponents/Mayak/MayakBeacon.qml</file>
         <file>newComponents/Mayak/assets/f7-layer-sky.svg</file>
         <file>newComponents/Mayak/assets/f7-layer-land-tower.svg</file>
+        <file>newComponents/Mayak/assets/f7-layer-sky-day.svg</file>
+        <file>newComponents/Mayak/assets/f7-layer-land-tower-day.svg</file>
         <file>newComponents/Mayak/assets/mayak-f7-small-on.svg</file>
                 <file alias="fonts/Onest.ttf">../../fonts/Mayak/Onest.ttf</file>
         <file alias="fonts/JetBrainsMono-Regular.ttf">../../fonts/Mayak/JetBrainsMono-Regular.ttf</file>

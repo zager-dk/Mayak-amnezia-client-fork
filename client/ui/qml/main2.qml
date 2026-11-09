@@ -234,6 +234,51 @@ Window  {
         }
     }
 
+    // Mayak: Android system bars follow the theme (dark icons on the day surface).
+    readonly property bool mayakLightSystemBars: AmneziaStyle.mayakDay && !AmneziaStyle.mayakDarkScene
+    function applyMayakSystemBars() {
+        if (Qt.platform.os !== "android") return
+        PageController.updateSystemBarsAppearance(root.mayakLightSystemBars)
+        PageController.updateNavigationBarColor(AmneziaStyle.mayakNavigationBarColor)
+    }
+    onMayakLightSystemBarsChanged: applyMayakSystemBars()
+    Connections {
+        target: AmneziaStyle
+        function onMayakDayChanged() { root.applyMayakSystemBars() }
+    }
+    Component.onCompleted: applyMayakSystemBars()
+
+    // Mayak (Windows): another VPN is on and may keep Mayak from connecting.
+    Connections {
+        target: ConnectionController
+
+        function onForeignVpnDetected(program, stoppable) {
+            let headerText = qsTr("Включён другой VPN: %1").arg(program)
+            if (stoppable) {
+                root.showQuestionDrawer(headerText,
+                    qsTr("Он может мешать Маяку подключиться. Маяк может выключить VPN в %1 — саму программу закрывать не нужно.").arg(program),
+                    qsTr("Выключить %1 и подключить").arg(program),
+                    qsTr("Подключить всё равно"),
+                    function() {
+                        PageController.showNotificationMessage(qsTr("Выключаем VPN %1…").arg(program))
+                        ConnectionController.stopForeignVpnAndConnect()
+                    },
+                    function() { ConnectionController.connectDespiteForeignVpn() })
+            } else {
+                root.showQuestionDrawer(headerText,
+                    qsTr("Он может мешать Маяку подключиться. Выключите VPN в программе %1 и нажмите «Включить Маяк» снова.").arg(program),
+                    qsTr("Подключить всё равно"),
+                    qsTr("Отмена"),
+                    function() { ConnectionController.connectDespiteForeignVpn() },
+                    function() {})
+            }
+        }
+
+        function onForeignVpnStopFailed(program) {
+            PageController.showErrorMessage(qsTr("Не удалось выключить VPN %1. Выключите VPN в программе %1 и нажмите «Включить Маяк» снова.").arg(program))
+        }
+    }
+
     Connections {
         target: SubscriptionUiController
 

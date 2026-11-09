@@ -319,6 +319,11 @@ void AndroidController::setNavigationBarColor(unsigned int color)
     callActivityMethod("setNavigationBarColor", "(I)V", color);
 }
 
+void AndroidController::setLightSystemBars(bool light)
+{
+    callActivityMethod("setLightSystemBars", "(Z)V", light);
+}
+
 void AndroidController::minimizeApp()
 {
     callActivityMethod("minimizeApp", "()V");

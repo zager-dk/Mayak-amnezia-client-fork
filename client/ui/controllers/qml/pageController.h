@@ -32,6 +32,7 @@ public slots:
 
     unsigned int getInitialPageNavigationBarColor();
     void updateNavigationBarColor(const int color);
+    void updateSystemBarsAppearance(bool light);
 
     void showOnStartup();
     bool shouldStartMinimized() const;

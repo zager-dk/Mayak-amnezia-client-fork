@@ -1578,6 +1578,24 @@ class AmneziaActivity : QtActivity() {
         }
     }
 
+    // Mayak: dark status/navigation bar icons on the day theme, light icons on the night theme
+    // and over the night city photo. Called from QML through PageController.
+    @Suppress("unused")
+    fun setLightSystemBars(light: Boolean) {
+        Log.v(TAG, "Set light system bars: $light")
+        mainScope.launch {
+            // Below Android 14 the status bar is an opaque colour (not edge-to-edge): it must follow
+            // the theme too, or dark icons land on the night bar (review 5120 #3).
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                window.statusBarColor = if (light) 0xFFF5F3EE.toInt() else getColor(R.color.black)
+            }
+            WindowInsetsControllerCompat(window, window.decorView).apply {
+                isAppearanceLightStatusBars = light
+                isAppearanceLightNavigationBars = light
+            }
+        }
+    }
+
     @Suppress("unused")
     fun setNavigationBarColor(color: Int) {
         Log.v(TAG, "Change navigation bar color: ${"#%08X".format(color)}")

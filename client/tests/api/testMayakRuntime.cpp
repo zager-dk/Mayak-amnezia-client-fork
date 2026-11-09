@@ -4,6 +4,7 @@
 #include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QPromise>
+#include <QSet>
 #include <QSignalSpy>
 #include <QTemporaryDir>
 #include <QTest>
@@ -86,6 +87,10 @@ struct World : QObject {
     std::function<void(B::Ticket)> observeFailover;
     bool silentFirst=false, singleCandidate=false;
     int localFailStarts=0; // Windows: the next N starts never bring the tunnel interface up (no health)
+    // Windows: the service is still busy failing the adapter, so the first stop of such an
+    // attempt is not confirmed in time (a later stop is).
+    bool localFailStopUnconfirmed=false;
+    QSet<QString> localFailTickets, localFailStopsSeen;
     QString lastAcquireCandidate() const {
         QString id;
         for (const auto& p:requestPayloads) if (p.value("action").toString()=="acquire") id=p.value("candidate_id").toString();
@@ -128,7 +133,7 @@ struct World : QObject {
             AwgHealthContext expected{guid(),QString(64,'a'),selectedHost+":49963"};
             done({ticket,deadFirst && starts==1?B::Outcome::Failed:B::Outcome::Started,expected});
             // localFailStarts: started, but the tunnel interface never comes up (no health at all).
-            if (localFailStarts>0) { --localFailStarts; events<<"local_fail"; return; }
+            if (localFailStarts>0) { --localFailStarts; events<<"local_fail"; localFailTickets.insert(ticket.opaqueAttempt); return; }
             // silentFirst: the first exit never answers a handshake (no valid health ever).
             const bool silent=silentFirst && selectedHost=="81.29.149.103";
             health={expected.id,1,expected.peerPublicKey,expected.endpoint,"10.8.0.2","MayakFixture",quint64(QDateTime::currentMSecsSinceEpoch()),10,10,!silent};
@@ -137,6 +142,9 @@ struct World : QObject {
         port.cancel=[](B::Ticket t){t.gate->cancel();};
         port.stop=[this](B::Ticket t,QString nonce,qint64,B::Done done) {
             ++stops; events<<"down"; stopTickets.append(t);
+            if(localFailStopUnconfirmed && localFailTickets.contains(t.opaqueAttempt) && !localFailStopsSeen.contains(t.opaqueAttempt)) {
+                localFailStopsSeen.insert(t.opaqueAttempt); events<<"down_unconfirmed"; done({t,B::Outcome::Unknown,{},nonce}); return;
+            }
             if(holdNextStop) {holdNextStop=false;heldStopNonce=nonce;heldStopDone=done;return;}
             if(failStopOnce) {failStopOnce=false;done({t,B::Outcome::Unknown,{},nonce});return;}
             if(missingStop) {done({t,B::Outcome::Unknown,{},nonce});return;}
@@ -1446,6 +1454,82 @@ private slots:
         w.runtime->begin(w.id);
         QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
         QCOMPARE(w.lastAcquireCandidate(),w.first);
+        settle(w);
+    }
+    // Real 5.1.0.19 case: the service blocks ~16 s failing WinTun, so the 3 s stop is unconfirmed.
+    void localAdapterFailureWithUnconfirmedStopRestartsAndConnects() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning();
+        World w; w.localFailStarts=1; w.localFailStopUnconfirmed=true;
+        QList<Vpn::ConnectionState> seen; QStringList texts;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState s,QString t){seen<<s;texts<<t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,40000);
+        QCOMPARE(w.events.count("local_fail"),1);
+        QCOMPARE(w.events.count("down_unconfirmed"),1);
+        QVERIFY(!seen.contains(Vpn::ConnectionState::Error));
+        QVERIFY(std::any_of(texts.cbegin(),texts.cend(),[](const QString& t){
+            return t.startsWith(QStringLiteral("VPN-адаптер Windows не запустился — повторим через")); }));
+        QVERIFY(w.reconciles>=1); // the unconfirmed attempt was released exactly before the restart
+        QCOMPARE(w.lastAcquireCandidate(),w.first); // the exit was not blamed
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+    }
+    void localAdapterUnconfirmedStopPauseIsCancelledByUser() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning();
+        auto t=MayakAutoConnectRuntime::recoveryTiming(); t.localStartRetryMs={60000};
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(t);
+        World w; w.localFailStarts=1000; w.localFailStopUnconfirmed=true;
+        QString last;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState,QString t){last=t;});
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(last.startsWith(QStringLiteral("VPN-адаптер Windows не запустился — повторим через 60 с")),40000);
+        QVERIFY(w.runtime->busy());
+        const int starts=w.starts;
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTest::qWait(300);
+        QCOMPARE(w.starts,starts); // no restart after the user's OFF
+        QVERIFY(!w.runtime->busy());
+    }
+    // Review 5120 #1: the UI path of the main button during the pause is retryCleanup(), not cancel().
+    void localAdapterUnconfirmedStopPauseUserRetryCleanupDoesNotReconnect() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning();
+        auto t=MayakAutoConnectRuntime::recoveryTiming(); t.localStartRetryMs={60000};
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(t);
+        World w; w.localFailStarts=1000; w.localFailStopUnconfirmed=true;
+        QString last;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState,QString t){last=t;});
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(last.startsWith(QStringLiteral("VPN-адаптер Windows не запустился — повторим через 60 с")),40000);
+        QVERIFY(w.runtime->cleanupPending());
+        const int starts=w.starts;
+        w.runtime->retryCleanup();            // what ConnectionController::closeConnection() calls
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTest::qWait(300);
+        QCOMPARE(w.starts,starts);            // no new session after the user's OFF
+        QVERIFY(!w.runtime->busy());
+    }
+    void localAdapterUnconfirmedStopRestartsAreBoundedAcrossSessions() {
+        FastRecoveryTiming timing; useWindowsHealthMeaning(); // localStartRetryMs = {100,150}
+        World w; w.localFailStarts=1000; w.localFailStopUnconfirmed=true;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,60000);
+        QCOMPARE(w.events.count("local_fail"),3); // first session + 2 restarts, then the cleanup prompt
+        QVERIFY(w.runtime->cleanupPending());
+        const int starts=w.starts;
+        QTest::qWait(500);
+        QCOMPARE(w.starts,starts);
+        w.runtime->retryCleanup();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        // A new user connect starts with a fresh retry budget.
+        w.localFailStarts=0;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
         settle(w);
     }
     void windowsHealthMeaningIsThePlatformDefault() {

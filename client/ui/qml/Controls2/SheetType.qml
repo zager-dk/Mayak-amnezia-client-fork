@@ -81,14 +81,14 @@ Popup {
     }
 
     onAboutToShow: {
-        if (PageController.getInitialPageNavigationBarColor() !== root.navigationBarColor) {
+        if (AmneziaStyle.mayakNavigationBarColor !== root.navigationBarColor) {
             PageController.updateNavigationBarColor(root.navigationBarColor)
         }
     }
 
     onClosed: {
         externalDrag = false
-        const initialPageNavigationBarColor = PageController.getInitialPageNavigationBarColor()
+        const initialPageNavigationBarColor = AmneziaStyle.mayakNavigationBarColor
         if (initialPageNavigationBarColor !== root.navigationBarColor) {
             PageController.updateNavigationBarColor(initialPageNavigationBarColor)
         }

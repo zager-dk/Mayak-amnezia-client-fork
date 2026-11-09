@@ -70,6 +70,7 @@ public:
     void setSaveLogs(bool enabled);
     void setScreenshotsEnabled(bool enabled);
     void setNavigationBarColor(unsigned int color);
+    void setLightSystemBars(bool light);
     void minimizeApp();
     QJsonArray getAppList();
     QPixmap getAppIcon(const QString &package, QSize *size, const QSize &requestedSize);

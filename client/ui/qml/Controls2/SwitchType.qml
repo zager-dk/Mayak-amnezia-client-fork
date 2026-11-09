@@ -35,12 +35,13 @@ Switch {
         Rectangle {
             anchors.fill: parent
 
+            // Mayak design system: switches are neutral (no amber, no glow); outline line-strong >= 3:1.
             radius: height / 2
-            color: AmneziaStyle.color.bgSurfaceAlt
+            color: root.checked ? AmneziaStyle.color.mayakInkMuted : "transparent"
             border.width: 1
-            border.color: root.checked ? AmneziaStyle.color.accentDark : AmneziaStyle.color.borderSoft
+            border.color: root.checked ? AmneziaStyle.color.mayakInkMuted : AmneziaStyle.color.mayakLineStrong
 
-            Behavior on border.color {
+            Behavior on color {
                 ColorAnimation { duration: 150 }
             }
         }
@@ -53,15 +54,7 @@ Switch {
             radius: 18
 
             visible: root.enabled && (root.hovered || root.down)
-            color: root.checked ? AmneziaStyle.color.bgStateLayerAccent : AmneziaStyle.color.bgStateLayer
-        }
-
-        SelectionGlowType {
-            anchors.fill: parent
-
-            source: knob
-            visible: root.checked
-            color: AmneziaStyle.color.accentLight
+            color: AmneziaStyle.color.bgStateLayer
         }
 
         Rectangle {
@@ -74,7 +67,7 @@ Switch {
             height: 20
             radius: 10
 
-            color: root.checked ? AmneziaStyle.color.accentLight : AmneziaStyle.color.iconSecondary
+            color: root.checked ? AmneziaStyle.color.mayakSurface0 : AmneziaStyle.color.mayakLineStrong
 
             Behavior on x {
                 enabled: !root.down

@@ -18,6 +18,7 @@ PageType {
     property string emailValue: ""
     property string passwordValue: ""
     property string inviteValue: ""
+    property bool confirmLogout: false
     readonly property bool canBindCredentials: inviteController.hasSession && inviteController.accountMetadataKnown
                                                    && !inviteController.accountHasPassword
 
@@ -37,6 +38,7 @@ PageType {
         inviteValue = ""
         inviteField.textField.clear()
         inviteMode = false
+        confirmLogout = false
         flickable.contentY = 0
     }
 
@@ -92,9 +94,9 @@ PageType {
 
             NavigationBarType {
                 Layout.fillWidth: true
-                title: qsTr("Подключить Маяк")
+                title: root.inviteController.hasSession ? qsTr("Аккаунт") : qsTr("Подключить Маяк")
                 description: root.inviteController.hasSession
-                             ? qsTr("Настройки аккаунта")
+                             ? qsTr("Вход, устройства и Telegram")
                              : qsTr("Вход по адресу почты")
             }
 
@@ -140,7 +142,7 @@ PageType {
                             }
                             if (root.inviteController.accountHasPassword) {
                                 return root.inviteController.accountEmail.length > 0
-                                        ? qsTr("Вы вошли как %1. Повторная привязка не нужна.").arg(root.inviteController.accountEmail)
+                                        ? qsTr("Вы вошли как %1. Повторная привязка не нужна.").arg(root.inviteController.accountEmail.toLowerCase())
                                         : qsTr("Вы вошли в аккаунт. Повторная привязка не нужна.")
                             }
                             return qsTr("Добавьте почту и пароль, чтобы входить без нового приглашения.")
@@ -443,18 +445,53 @@ PageType {
                 }
             }
 
+            // Опасное действие: красный текст на нейтральной кнопке и подтверждение на странице.
             ButtonType {
                 objectName: "mayak-auth-logout"
                 Layout.fillWidth: true
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
-                visible: root.inviteController.hasSession
+                visible: root.inviteController.hasSession && !root.confirmLogout
                 enabled: visible && !root.inviteController.busy
-                variant: ButtonType.Text
+                variant: ButtonType.Destructive
                 text: qsTr("Выйти из аккаунта")
-                onClicked: {
-                    root.inviteController.logout()
-                    root.clearFields()
+                onClicked: root.confirmLogout = true
+            }
+
+            ColumnLayout {
+                objectName: "mayak-auth-logout-confirm"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                spacing: 8
+                visible: root.inviteController.hasSession && root.confirmLogout
+
+                BodyTextType {
+                    Layout.fillWidth: true
+                    wrapMode: Text.WordWrap
+                    text: qsTr("Выйти из аккаунта на этом устройстве? Маяк не будет подключаться, пока вы не войдёте снова.")
+                    color: AmneziaStyle.color.textPrimary
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    ButtonType {
+                        objectName: "mayak-auth-logout-confirm-yes"
+                        Layout.fillWidth: true
+                        variant: ButtonType.Destructive
+                        enabled: !root.inviteController.busy
+                        text: qsTr("Выйти")
+                        onClicked: {
+                            root.inviteController.logout()
+                            root.clearFields()
+                        }
+                    }
+                    ButtonType {
+                        Layout.fillWidth: true
+                        variant: ButtonType.Secondary
+                        text: qsTr("Остаться")
+                        onClicked: root.confirmLogout = false
+                    }
                 }
             }
 

@@ -14,7 +14,7 @@ Text {
         return root.verticalAlignment === Text.AlignBottom ? extra : 0
     }
 
-    lineHeight: 18 + LanguageUiController.getLineHeightAppend()
+    lineHeight: 21 + LanguageUiController.getLineHeightAppend()
     lineHeightMode: Text.FixedHeight
 
     topPadding: root.halfLeading + root.alignmentShift

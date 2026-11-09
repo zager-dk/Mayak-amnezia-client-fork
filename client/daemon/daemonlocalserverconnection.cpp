@@ -13,6 +13,10 @@
 #include "leakdetector.h"
 #include "logger.h"
 
+#if defined(MZ_WINDOWS)
+#  include "platforms/windows/daemon/mayakforeignvpnstop.h"
+#endif
+
 namespace {
 Logger logger("DaemonLocalServerConnection");
 }
@@ -137,6 +141,18 @@ void DaemonLocalServerConnection::parseCommand(const QByteArray& data) {
     write(result);
     return;
   }
+
+#if defined(MZ_WINDOWS)
+  // Mayak: the user pressed "turn off Browsec" in the app. Only fixed, known cores are ended.
+  if (type == "mayakStopForeignVpn") {
+    const QString request = obj.value("requestId").toString();
+    if (request.size() != 64) return;
+    const int stopped = MayakForeignVpnStop::stopKnownCores();
+    write(QJsonObject{{"type", "mayakForeignVpnStopped"}, {"owner", "MayakVpnAwgLifecycleV1"},
+        {"requestId", request}, {"stopped", stopped}});
+    return;
+  }
+#endif
 
   if (type == "deactivate") {
     Daemon::instance()->deactivate(true);

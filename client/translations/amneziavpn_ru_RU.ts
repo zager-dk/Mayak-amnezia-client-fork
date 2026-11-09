@@ -3355,7 +3355,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettings.qml" line="104"/>
         <source>News &amp; Notifications</source>
-        <translation>Новости и Уведомления</translation>
+        <translation>Новости и уведомления</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettings.qml" line="122"/>
@@ -4205,7 +4205,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsApplication.qml" line="274"/>
         <source>All settings will be reset to default. All installed AmneziaVPN services will still remain on the server.</source>
-        <translation>Все настройки будут сброшены до значений по умолчанию. Все установленные сервисы AmneziaVPN останутся на сервере.</translation>
+        <translation>Все настройки приложения вернутся к значениям по умолчанию. Аккаунт и серверы Маяка не изменятся.</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsApplication.qml" line="275"/>
@@ -4243,7 +4243,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsBackup.qml" line="65"/>
         <source>The backup will contain your passwords and private keys for all servers added to AmneziaVPN. Keep this information in a secure place.</source>
-        <translation>Резервная копия будет содержать ваши пароли и закрытые ключи для всех серверов, добавленных в AmneziaVPN. Храните эту информацию в надежном месте.</translation>
+        <translation>Резервная копия содержит пароли и закрытые ключи всех серверов в приложении. Храните её в надёжном месте.</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsBackup.qml" line="88"/>
@@ -4312,12 +4312,12 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsConnection.qml" line="53"/>
         <source>Use AmneziaDNS</source>
-        <translation>Использовать AmneziaDNS</translation>
+        <translation>Использовать DNS на сервере</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsConnection.qml" line="54"/>
         <source>If AmneziaDNS is installed on the server</source>
-        <translation>Если AmneziaDNS установлен на сервере</translation>
+        <translation>Если на сервере Маяка работает свой DNS</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsConnection.qml" line="80"/>
@@ -4327,7 +4327,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsConnection.qml" line="81"/>
         <source>When AmneziaDNS is not used or installed</source>
-        <translation>Когда AmneziaDNS не используется или не установлен</translation>
+        <translation>Когда DNS на сервере не используется</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsConnection.qml" line="94"/>
@@ -4352,7 +4352,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsConnection.qml" line="126"/>
         <source>KillSwitch</source>
-        <translation>KillSwitch</translation>
+        <translation>Блокировка без VPN</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsConnection.qml" line="127"/>
@@ -4375,7 +4375,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsDns.qml" line="45"/>
         <source>If AmneziaDNS is not used or installed</source>
-        <translation>Если AmneziaDNS не используется или не установлен</translation>
+        <translation>Если DNS на сервере не используется</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsDns.qml" line="64"/>
@@ -4433,7 +4433,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="36"/>
         <source>KillSwitch</source>
-        <translation>KillSwitch</translation>
+        <translation>Блокировка без VPN</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="37"/>
@@ -4443,12 +4443,12 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="50"/>
         <source>KillSwitch settings cannot be changed during an active connection</source>
-        <translation>Настройки KillSwitch нельзя изменить во время активного подключения</translation>
+        <translation>Настройки блокировки нельзя менять, пока Маяк подключён</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="79"/>
         <source>Soft KillSwitch</source>
-        <translation>Soft KillSwitch</translation>
+        <translation>Мягкая блокировка</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="80"/>
@@ -4458,7 +4458,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="96"/>
         <source>Strict KillSwitch</source>
-        <translation>Strict KillSwitch</translation>
+        <translation>Строгая блокировка</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="97"/>
@@ -4473,7 +4473,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="101"/>
         <source>If the VPN disconnects or drops while Strict KillSwitch is enabled, internet access will be blocked. To restore access, reconnect VPN or disable/change the KillSwitch.</source>
-        <translation>Если VPN отключится или соединение прервётся при включённом Strict KillSwitch, доступ в интернет будет заблокирован. Чтобы восстановить доступ, снова подключитесь к VPN или отключите (измените) режим KillSwitch.</translation>
+        <translation>Если VPN отключится или соединение прервётся при включённой строгой блокировке, доступ в интернет будет закрыт. Чтобы вернуть доступ, снова включите Маяк или смените режим блокировки.</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="102"/>
@@ -4493,7 +4493,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitch.qml" line="123"/>
         <source>DNS servers listed here will remain accessible when KillSwitch is active.</source>
-        <translation>DNS-серверы из этого списка останутся доступными при активном KillSwitch.</translation>
+        <translation>DNS-серверы из этого списка остаются доступны, когда блокировка включена.</translation>
     </message>
 </context>
 <context>
@@ -4506,7 +4506,7 @@ Create one from the current settings.</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitchExceptions.qml" line="58"/>
         <source>DNS servers listed here will remain accessible when KillSwitch is active</source>
-        <translation>DNS-серверы из этого списка останутся доступными при активном KillSwitch</translation>
+        <translation>DNS-серверы из этого списка остаются доступны, когда блокировка включена</translation>
     </message>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsKillSwitchExceptions.qml" line="79"/>
@@ -4816,7 +4816,7 @@ Only one can be active at a time: VPN or local proxy</source>
     <message>
         <location filename="../ui/qml/Pages2/PageSettingsNewsNotifications.qml" line="31"/>
         <source>News &amp; Notifications</source>
-        <translation>Новости и Уведомления</translation>
+        <translation>Новости и уведомления</translation>
     </message>
 </context>
 <context>

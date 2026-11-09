@@ -125,7 +125,7 @@ PageType {
                 Layout.rightMargin: 16
 
                 text: qsTr("About Mayak VPN")
-                icon.source: "qrc:/images/controls/amnezia.svg"
+                icon.source: "qrc:/images/controls/info.svg"
                 trailingIconSource: "qrc:/images/controls/chevron-right.svg"
 
                 onClicked: PageController.goToPage(PageEnum.PageSettingsAbout)

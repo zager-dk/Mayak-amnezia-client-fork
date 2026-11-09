@@ -49,6 +49,10 @@ public slots:
 
     void onTranslationsUpdated();
 
+    // Mayak (Windows): answers to the "another VPN is on" question.
+    void stopForeignVpnAndConnect();
+    void connectDespiteForeignVpn();
+
 signals:
     void connectionStateChanged();
 
@@ -59,6 +63,9 @@ signals:
     void prepareConfig();
     void unsupportedConnectDrawerRequested();
     void noInstalledContainers();
+
+    void foreignVpnDetected(const QString &program, bool stoppable);
+    void foreignVpnStopFailed(const QString &program);
 
 private:
     Vpn::ConnectionState getCurrentConnectionState();
@@ -72,6 +79,9 @@ private:
     QString m_connectionStateText = tr("Connect");
 
     Vpn::ConnectionState m_state;
+
+    QString m_foreignProgram;
+    bool m_foreignStopInFlight = false;
 };
 
 #endif
