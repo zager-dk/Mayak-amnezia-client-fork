@@ -210,6 +210,27 @@ void SecureAppSettingsRepository::setSitesSplitTunnelingEnabled(bool enabled)
     emit sitesSplitTunnelingEnabledChanged(enabled);
 }
 
+bool SecureAppSettingsRepository::isMayakRussiaDirectEnabled() const
+{
+    return value("Conf/mayakRussiaDirect", true).toBool();
+}
+
+void SecureAppSettingsRepository::setMayakRussiaDirectEnabled(bool enabled)
+{
+    setValue("Conf/mayakRussiaDirect", enabled);
+    emit mayakRussiaDirectEnabledChanged(enabled);
+}
+
+bool SecureAppSettingsRepository::isMayakRussiaDirectNoticeShown() const
+{
+    return value("Conf/mayakRussiaDirectNoticeShown", false).toBool();
+}
+
+void SecureAppSettingsRepository::setMayakRussiaDirectNoticeShown(bool shown)
+{
+    setValue("Conf/mayakRussiaDirectNoticeShown", shown);
+}
+
 namespace {
     QString appsRouteModeString(AppsRouteMode mode) {
         switch (mode) {
@@ -521,6 +542,30 @@ bool SecureAppSettingsRepository::setMayakSessionToken(const QString &token)
 bool SecureAppSettingsRepository::isMayakManagedServer(const QString &id) const
 {
     return !id.isEmpty() && value(QStringLiteral("Mayak/managedServers")).toStringList().contains(id);
+}
+
+QString SecureAppSettingsRepository::mayakServerForDevice(const QString &deviceId) const
+{
+    if (deviceId.isEmpty()) return {};
+    return value(QStringLiteral("Mayak/deviceServers")).toMap().value(deviceId).toString();
+}
+
+void SecureAppSettingsRepository::setMayakServerForDevice(const QString &deviceId, const QString &serverId)
+{
+    if (deviceId.isEmpty() || serverId.isEmpty()) return;
+    QVariantMap map = value(QStringLiteral("Mayak/deviceServers")).toMap();
+    // У одного сервера в списке — одно устройство: прежняя запись для этого сервера снимается.
+    for (auto it = map.begin(); it != map.end();) {
+        if (it.value().toString() == serverId && it.key() != deviceId) it = map.erase(it);
+        else ++it;
+    }
+    map.insert(deviceId, serverId);
+    setValue(QStringLiteral("Mayak/deviceServers"), map);
+}
+
+bool SecureAppSettingsRepository::hasMayakDeviceServers() const
+{
+    return !value(QStringLiteral("Mayak/deviceServers")).toMap().isEmpty();
 }
 
 bool SecureAppSettingsRepository::markMayakManagedServer(const QString &id)

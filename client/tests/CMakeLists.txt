@@ -27,6 +27,7 @@ set(CMAKE_AUTOUIC ON)
 qt6_add_resources(TEST_QRC
     ../server_scripts/serverScripts.qrc
     ../resources/countries.qrc
+    ../resources/mayakRoutes.qrc
     ../../mayak/update_signing_key.qrc
 )
 

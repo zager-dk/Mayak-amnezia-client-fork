@@ -76,6 +76,20 @@
 
         </activity>
 
+        <!-- Mayak: invisible tile/notification "Connect" trampoline (main process, no UI). -->
+        <activity
+            android:name=".MayakConnectActivity"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay" />
+
+        <!-- Mayak: service watchdog -> app (main process): current exit unreachable, reconnect. -->
+        <receiver
+            android:name=".MayakFailoverReceiver"
+            android:exported="false" />
+
         <activity
             android:name=".CameraActivity"
             android:excludeFromRecents="true"

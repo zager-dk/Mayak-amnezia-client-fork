@@ -1,0 +1,5 @@
+<RCC>
+    <qresource prefix="/mayak">
+        <file alias="ru_ipv4.txt">mayak/ru_ipv4.txt</file>
+    </qresource>
+</RCC>

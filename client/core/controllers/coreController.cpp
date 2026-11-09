@@ -1,4 +1,5 @@
 #include "coreController.h"
+#include "ui/controllers/mayakRoutingUiController.h"
 #include "mayakAutoConnectRuntime.h"
 
 #include <QCoreApplication>
@@ -246,6 +247,7 @@ void CoreController::initControllers()
 
     m_ipSplitTunnelingUiController = new IpSplitTunnelingUiController(m_ipSplitTunnelingController, m_ipSplitTunnelingModel, this);
     setQmlContextProperty("IpSplitTunnelingController", m_ipSplitTunnelingUiController);
+    setQmlContextProperty("MayakRouting", new MayakRoutingUiController(m_appSettingsRepository, this));
 
     m_allowedDnsUiController = new AllowedDnsUiController(m_allowedDnsController, m_allowedDnsModel, this);
     setQmlContextProperty("AllowedDnsController", m_allowedDnsUiController);

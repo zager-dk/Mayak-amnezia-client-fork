@@ -38,6 +38,8 @@ public:
     // Server management
     bool renameServer(const QString &serverId, const QString &name);
     void removeServer(const QString &serverId);
+    // Маяк: заменить ключ доступа подписки (ключ аккаунта → ключ устройства) без нового сервера в списке.
+    bool setApiV2AuthKey(const QString &serverId, const QString &apiKey);
     void setDefaultServer(const QString &serverId);
 
     // Container management

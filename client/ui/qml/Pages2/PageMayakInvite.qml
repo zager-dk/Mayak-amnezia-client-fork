@@ -273,6 +273,76 @@ PageType {
                 Accessible.name: text
             }
 
+            // Лимит устройств: человек сам выбирает, какое устройство заменить этим.
+            Rectangle {
+                objectName: "mayak-auth-device-limit"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                visible: root.inviteController.hasSession && root.inviteController.limitDevices.length > 0
+                implicitHeight: limitColumn.implicitHeight + 32
+                radius: 18
+                color: AmneziaStyle.color.bgSurface
+                border.width: 1
+                border.color: AmneziaStyle.color.borderFaint
+
+                ColumnLayout {
+                    id: limitColumn
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.leftMargin: 16
+                    anchors.rightMargin: 16
+                    spacing: 12
+
+                    H2TextType {
+                        Layout.fillWidth: true
+                        text: qsTr("Какое устройство заменить?")
+                        color: AmneziaStyle.color.textPrimary
+                    }
+
+                    Repeater {
+                        model: root.inviteController.limitDevices
+                        delegate: RowLayout {
+                            required property var modelData
+                            Layout.fillWidth: true
+                            spacing: 12
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                BodyTextType {
+                                    Layout.fillWidth: true
+                                    text: modelData.name + (modelData.os ? " · " + modelData.os : "")
+                                    textFormat: Text.PlainText
+                                    color: AmneziaStyle.color.textPrimary
+                                    elide: Text.ElideRight
+                                }
+                                BodyTextType {
+                                    Layout.fillWidth: true
+                                    text: qsTr("Последний раз в сети: %1").arg(root.formatSeen(modelData.lastSeen))
+                                    color: AmneziaStyle.color.textSecondary
+                                }
+                            }
+                            ButtonType {
+                                objectName: "mayak-auth-replace-device"
+                                text: qsTr("Заменить")
+                                variant: ButtonType.Secondary
+                                enabled: !root.inviteController.busy
+                                onClicked: root.inviteController.replaceDevice(modelData.id)
+                            }
+                        }
+                    }
+
+                    BodyTextType {
+                        Layout.fillWidth: true
+                        wrapMode: Text.WordWrap
+                        text: qsTr("Заменённое устройство отключится от Маяка. Места устройств, не подключавшихся 30 дней, освобождаются сами.")
+                        color: AmneziaStyle.color.textSecondary
+                    }
+                }
+            }
+
             ButtonType {
                 objectName: "mayak-auth-submit"
                 Layout.fillWidth: true
@@ -306,6 +376,71 @@ PageType {
                 onClicked: root.inviteController.accountMetadataKnown
                            ? root.inviteController.retrySetup()
                            : root.inviteController.refreshAccount()
+            }
+
+            // Telegram по желанию: уведомления о новых устройствах и вход через Telegram.
+            BodyTextType {
+                objectName: "mayak-auth-telegram-state"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                wrapMode: Text.WordWrap
+                // Имя из Telegram задаёт сам пользователь Telegram: только простой текст, без разметки.
+                textFormat: Text.PlainText
+                visible: root.inviteController.hasSession && root.inviteController.accountMetadataKnown
+                text: {
+                    if (root.inviteController.telegramLinked) {
+                        return root.inviteController.telegramName.length > 0
+                                ? qsTr("Telegram привязан: @%1").arg(root.inviteController.telegramName)
+                                : qsTr("Telegram привязан.")
+                    }
+                    if (root.inviteController.telegramConfirmName.length > 0) {
+                        return qsTr("Привязать Telegram %1 к этому аккаунту? Подтверждайте, только если это ваш Telegram.")
+                                .arg(root.inviteController.telegramConfirmName)
+                    }
+                    return root.inviteController.telegramLinkPending
+                            ? qsTr("Ждём нажатия «Запустить» в Telegram…")
+                            : qsTr("Привяжите Telegram, чтобы получать уведомления о новых устройствах.")
+                }
+                color: AmneziaStyle.color.textSecondary
+            }
+
+            ButtonType {
+                objectName: "mayak-auth-telegram-link"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                visible: root.inviteController.hasSession && root.inviteController.accountMetadataKnown
+                         && !root.inviteController.telegramLinked && root.inviteController.telegramConfirmName.length === 0
+                enabled: visible && !root.inviteController.busy
+                variant: ButtonType.Secondary
+                text: root.inviteController.telegramLinkPending ? qsTr("Отменить привязку") : qsTr("Привязать Telegram")
+                onClicked: root.inviteController.telegramLinkPending
+                           ? root.inviteController.cancelTelegramLink()
+                           : root.inviteController.linkTelegram()
+            }
+
+            RowLayout {
+                objectName: "mayak-auth-telegram-confirm"
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                spacing: 8
+                visible: root.inviteController.hasSession && root.inviteController.telegramConfirmName.length > 0
+
+                ButtonType {
+                    Layout.fillWidth: true
+                    text: qsTr("Да, это мой Telegram")
+                    enabled: !root.inviteController.busy
+                    onClicked: root.inviteController.confirmTelegramLink()
+                }
+                ButtonType {
+                    Layout.fillWidth: true
+                    text: qsTr("Нет")
+                    variant: ButtonType.Secondary
+                    enabled: !root.inviteController.busy
+                    onClicked: root.inviteController.cancelTelegramLink()
+                }
             }
 
             ButtonType {
@@ -353,6 +488,14 @@ PageType {
             root.clearFields()
             root.pageController.goToPageHome()
         }
+        function onOpenExternalUrl(url) {
+            Qt.openUrlExternally(url)
+        }
+    }
+
+    function formatSeen(value) {
+        const date = new Date(value)
+        return isNaN(date.getTime()) ? qsTr("неизвестно") : date.toLocaleDateString(Qt.locale(), Locale.ShortFormat)
     }
 
     Component.onCompleted: root.inviteController.refreshAccount()

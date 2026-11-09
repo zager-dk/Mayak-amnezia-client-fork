@@ -80,6 +80,54 @@
         <file>tray/active.png</file>
         <file>tray/default.png</file>
         <file>tray/error.png</file>
+        <file>tray/mayak/connecting-dark-16.png</file>
+        <file>tray/mayak/connecting-dark-20.png</file>
+        <file>tray/mayak/connecting-dark-24.png</file>
+        <file>tray/mayak/connecting-dark-32.png</file>
+        <file>tray/mayak/connecting-dark-40.png</file>
+        <file>tray/mayak/connecting-dark-48.png</file>
+        <file>tray/mayak/connecting-light-16.png</file>
+        <file>tray/mayak/connecting-light-20.png</file>
+        <file>tray/mayak/connecting-light-24.png</file>
+        <file>tray/mayak/connecting-light-32.png</file>
+        <file>tray/mayak/connecting-light-40.png</file>
+        <file>tray/mayak/connecting-light-48.png</file>
+        <file>tray/mayak/error-dark-16.png</file>
+        <file>tray/mayak/error-dark-20.png</file>
+        <file>tray/mayak/error-dark-24.png</file>
+        <file>tray/mayak/error-dark-32.png</file>
+        <file>tray/mayak/error-dark-40.png</file>
+        <file>tray/mayak/error-dark-48.png</file>
+        <file>tray/mayak/error-light-16.png</file>
+        <file>tray/mayak/error-light-20.png</file>
+        <file>tray/mayak/error-light-24.png</file>
+        <file>tray/mayak/error-light-32.png</file>
+        <file>tray/mayak/error-light-40.png</file>
+        <file>tray/mayak/error-light-48.png</file>
+        <file>tray/mayak/off-dark-16.png</file>
+        <file>tray/mayak/off-dark-20.png</file>
+        <file>tray/mayak/off-dark-24.png</file>
+        <file>tray/mayak/off-dark-32.png</file>
+        <file>tray/mayak/off-dark-40.png</file>
+        <file>tray/mayak/off-dark-48.png</file>
+        <file>tray/mayak/off-light-16.png</file>
+        <file>tray/mayak/off-light-20.png</file>
+        <file>tray/mayak/off-light-24.png</file>
+        <file>tray/mayak/off-light-32.png</file>
+        <file>tray/mayak/off-light-40.png</file>
+        <file>tray/mayak/off-light-48.png</file>
+        <file>tray/mayak/on-dark-16.png</file>
+        <file>tray/mayak/on-dark-20.png</file>
+        <file>tray/mayak/on-dark-24.png</file>
+        <file>tray/mayak/on-dark-32.png</file>
+        <file>tray/mayak/on-dark-40.png</file>
+        <file>tray/mayak/on-dark-48.png</file>
+        <file>tray/mayak/on-light-16.png</file>
+        <file>tray/mayak/on-light-20.png</file>
+        <file>tray/mayak/on-light-24.png</file>
+        <file>tray/mayak/on-light-32.png</file>
+        <file>tray/mayak/on-light-40.png</file>
+        <file>tray/mayak/on-light-48.png</file>
         <file>controls/monitor.svg</file>
     </qresource>
 </RCC>

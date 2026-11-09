@@ -5,6 +5,7 @@ import android.app.PendingIntent
 import android.content.ComponentName
 import android.content.Intent
 import android.content.ServiceConnection
+import android.graphics.drawable.Icon
 import android.net.VpnService
 import android.os.Build
 import android.os.IBinder
@@ -134,7 +135,12 @@ class AmneziaTileService : TileService() {
     private fun onClickInternal() {
         if (isVpnConfigExists && vpnProto != null) {
             Log.d(TAG, "Change VPN state")
-            if (qsTile.state == Tile.STATE_INACTIVE) {
+            if (qsTile.state == Tile.STATE_INACTIVE && MayakLaunch.isManagedConfigSaved(this)) {
+                // Mayak: the service cannot start a session without fresh admission; open the
+                // app and let it connect (otherwise the tile silently stayed "connecting").
+                Log.d(TAG, "Start Mayak connection via app")
+                startActivityAndCollapseCompat(MayakLaunch.connectIntent(this))
+            } else if (qsTile.state == Tile.STATE_INACTIVE) {
                 Log.d(TAG, "Start VPN")
                 updateVpnState(CONNECTING)
                 startVpn()
@@ -246,6 +252,9 @@ class AmneziaTileService : TileService() {
         val tile = qsTile ?: return
         tile.apply {
             label = (vpnState.serverName ?: DEFAULT_TILE_LABEL) + (vpnProto?.let { " ${it.label}" } ?: "")
+            // Mayak: the lamp shows the state (lit = connected, empty window = not connected).
+            icon = Icon.createWithResource(this@AmneziaTileService,
+                if (vpnState.protocolState == CONNECTED) R.drawable.ic_mayak_status_on else R.drawable.ic_amnezia_round)
             when (val protocolState = vpnState.protocolState) {
                 CONNECTED -> {
                     state = Tile.STATE_ACTIVE

@@ -6,6 +6,7 @@ import android.net.ConnectivityManager.NetworkCallback
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkCapabilities.NET_CAPABILITY_INTERNET
+import android.net.NetworkCapabilities.NET_CAPABILITY_NOT_VPN
 import android.net.NetworkCapabilities.NET_CAPABILITY_VALIDATED
 import android.net.NetworkRequest
 import android.os.Build
@@ -19,7 +20,11 @@ private const val TAG = "NetworkState"
 
 class NetworkState(
     private val context: Context,
-    private val onNetworkChange: () -> Unit
+    private val onNetworkChange: () -> Unit,
+    // Optional observer for loss of the current best network; existing callers keep old behavior.
+    private val onNetworkLost: () -> Unit = {},
+    // Track the best underlying (non-VPN) network instead of whatever network serves this uid.
+    private val excludeVpn: Boolean = false
 ) {
     private var currentNetwork: Network? = null
     private var validated: Boolean = false
@@ -36,6 +41,7 @@ class NetworkState(
     private val networkRequest: NetworkRequest by lazy(NONE) {
         NetworkRequest.Builder()
             .addCapability(NET_CAPABILITY_INTERNET)
+            .apply { if (excludeVpn) addCapability(NET_CAPABILITY_NOT_VPN) }
             .build()
     }
 
@@ -72,6 +78,11 @@ class NetworkState(
 
             override fun onLost(network: Network) {
                 Log.v(TAG, "onLost: $network")
+                if (network == currentNetwork) {
+                    // Underlying tracking: the same network validating again is a new event.
+                    if (excludeVpn) validated = false
+                    onNetworkLost()
+                }
             }
         }
     }

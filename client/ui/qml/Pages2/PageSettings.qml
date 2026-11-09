@@ -56,8 +56,8 @@ PageType {
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
-                text: qsTr("Mayak account")
-                subtitle: MayakInviteController.hasSession ? qsTr("Signed in") : qsTr("Sign in or create an account")
+                text: qsTr("Аккаунт Маяка")
+                subtitle: MayakInviteController.hasSession ? qsTr("Вход выполнен · устройства, Telegram") : qsTr("Войти или создать аккаунт")
                 icon.source: "qrc:/images/controls/mail.svg"
                 trailingIconSource: "qrc:/images/controls/chevron-right.svg"
 

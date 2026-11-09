@@ -12,6 +12,7 @@ SheetType {
     id: root
 
     property bool isAppSplitTinnelingEnabled: Qt.platform.os === "windows" || Qt.platform.os === "android"
+    readonly property bool russiaDirect: typeof MayakRouting !== "undefined" && MayakRouting.russiaDirect
 
     expandedHeight: Math.min(content.implicitHeight + 24 + PageController.safeAreaBottomMargin, windowHeight * 0.9)
 
@@ -30,8 +31,10 @@ SheetType {
             Layout.leftMargin: 16
             Layout.bottomMargin: 32
 
-            headerText: qsTr("Split tunneling")
-            descriptionText:  qsTr("Allows you to connect to some sites or applications through a VPN connection and bypass others")
+            headerText: qsTr("Раздельное туннелирование")
+            descriptionText: root.russiaDirect
+                ? qsTr("Включён режим «Россия напрямую». Здесь — исключения: сайты и приложения, которые идут иначе.")
+                : qsTr("Allows you to connect to some sites or applications through a VPN connection and bypass others")
         }
 
         ListItemType {
@@ -58,8 +61,9 @@ SheetType {
             Layout.leftMargin: 16
             Layout.rightMargin: 16
 
-            text: qsTr("Site-based split tunneling")
-            subtitle: enabled && IpSplitTunnelingController.isSplitTunnelingEnabled ? qsTr("Enabled") : qsTr("Disabled")
+            text: root.russiaDirect ? qsTr("Исключения для сайтов") : qsTr("Site-based split tunneling")
+            subtitle: root.russiaDirect ? qsTr("Всегда через VPN или всегда напрямую")
+                                        : enabled && IpSplitTunnelingController.isSplitTunnelingEnabled ? qsTr("Enabled") : qsTr("Disabled")
             trailingIconSource: "qrc:/images/controls/chevron-right.svg"
 
             onClicked: {

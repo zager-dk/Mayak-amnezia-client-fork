@@ -231,6 +231,9 @@ class AmneziaActivity : QtActivity() {
                     replyTo = activityMessenger
                 )
                 isServiceConnected = true
+                // Mayak: tell the service whether this Activity can receive streamed health.
+                vpnServiceMessenger.send(if (isActivityStarted) Action.UI_FOREGROUND else Action.UI_BACKGROUND,
+                    replyTo = activityMessenger)
                 pendingManagedMessages.toList().also { pendingManagedMessages.clear() }.forEach {
                     vpnServiceMessenger.send(it, activityMessenger)
                 }
@@ -301,7 +304,9 @@ class AmneziaActivity : QtActivity() {
         pendingOpenFileUri = savedInstanceState?.getString(KEY_PENDING_OPEN_FILE_URI)
         openFileDeliveryScheduled = false
         registerBroadcastReceivers()
+        restoredFromState = savedInstanceState != null
         intent?.let(::processIntent)
+        restoredFromState = false
         runBlocking { vpnProto = proto.await() }
         billingRepository = BillingPaymentRepository(applicationContext)
     }
@@ -356,14 +361,55 @@ class AmneziaActivity : QtActivity() {
                     }
                 }
             }
+            // Mayak: tile/notification "Connect" for a Mayak session; Qt starts the connect flow.
+            // Only our own trampoline's explicit action counts, and never a restored task intent.
+            if (intent.action == MayakLaunch.ACTION_CONNECT && !restoredFromState &&
+                intent.getBooleanExtra(MayakLaunch.EXTRA_CONNECT, false) &&
+                intent.getStringExtra(MayakLaunch.EXTRA_TOKEN) == MayakLaunch.launchToken) {
+                val background = intent.getBooleanExtra(MayakLaunch.EXTRA_BACKGROUND, false)
+                intent.removeExtra(MayakLaunch.EXTRA_CONNECT) // never replay on recreation
+                requestQtConnect()
+                if (background) mainScope.launch {
+                    // Started only to connect: go back as soon as Qt runs; it connects hidden.
+                    qtInitialized.await()
+                    if (!isFinishing && !isDestroyed) moveTaskToBack(true)
+                }
+            }
         }
     }
+
+    private fun requestQtConnect() {
+        Log.i(TAG, "MayakNet event=connect_request source=system_ui")
+        mainScope.launch {
+            qtInitialized.await()
+            QtAndroidController.onManagedLifecycle(JSONObject().put("type", "connectRequest")
+                .put("owner", "MayakVpnAwgLifecycleV1").toString())
+        }
+    }
+
+    // Mayak: lets the invisible MayakConnectActivity hand "Connect" to this running app.
+    private val liveConnectHandler: () -> Boolean = {
+        if (isFinishing || isDestroyed || !qtInitialized.isCompleted) false
+        else { requestQtConnect(); true }
+    }
+    // Mayak: lets MayakFailoverReceiver hand the service watchdog's failover request to Qt.
+    private val liveFailoverHandler: (String) -> Boolean = { healthContext ->
+        if (isFinishing || isDestroyed || !qtInitialized.isCompleted) false
+        else {
+            QtAndroidController.onManagedLifecycle(JSONObject().put("type", "managedFailover")
+                .put("owner", "MayakVpnAwgLifecycleV1").put("healthContextId", healthContext).toString())
+            true
+        }
+    }
+    private var restoredFromState = false
 
     override fun onStart() {
         super.onStart()
         val wasStarted = isActivityStarted
         isActivityStarted = true
         Log.d(TAG, "Start Amnezia activity")
+        // Mayak: resume streamed health; the service first replies with a managedResume summary.
+        if (isServiceConnected) vpnServiceMessenger.send(Action.UI_FOREGROUND, replyTo = activityMessenger)
         mainScope.launch {
             qtInitialized.await()
             vpnProto?.let { proto ->
@@ -386,6 +432,9 @@ class AmneziaActivity : QtActivity() {
         resumeHandler.removeCallbacksAndMessages(null)
         openFileDeliveryScheduled = false
         Log.d(TAG, "Stop Amnezia activity")
+        // Mayak: Android freezes a stopped Activity; a 1 Hz health stream into a frozen
+        // process exhausts its async binder space and gets the UI killed. Pause it.
+        if (isServiceConnected) vpnServiceMessenger.send(Action.UI_BACKGROUND, replyTo = activityMessenger)
         if (managedControlBindingLifetime.shouldUnbindForUiStop()) {
             doUnbindService()
             mainScope.launch {
@@ -586,6 +635,8 @@ class AmneziaActivity : QtActivity() {
     }
 
     override fun onDestroy() {
+        if (MayakLaunch.liveConnect === liveConnectHandler) MayakLaunch.liveConnect = null
+        if (MayakLaunch.liveFailover === liveFailoverHandler) MayakLaunch.liveFailover = null
         managedControlBindingLifetime.destroy()
         isActivityStarted = false
         isActivityResumed = false
@@ -1029,8 +1080,16 @@ class AmneziaActivity : QtActivity() {
             }
             "managedDenied" -> managedControlBindingLifetime.deny(
                 event.optString("ticket"), event.optString("healthContextId"))
+            // Mayak: an adopted session is owned exactly like one this Activity started, so the
+            // control binding survives onStop and a system-UI "Disconnect" still reaches Qt.
+            "managedAdopted" -> pendingAdopts.remove(event.optString("adoptRequestId"))?.let { (ticket, context) ->
+                if (event.optBoolean("adopted") && context == event.optString("healthContextId"))
+                    managedControlBindingLifetime.activate(ticket, context)
+            }
         }
     }
+
+    private val pendingAdopts = mutableMapOf<String, Pair<String, String>>()
 
     @MainThread
     private fun disconnectFromVpn() {
@@ -1045,6 +1104,8 @@ class AmneziaActivity : QtActivity() {
     fun qtAndroidControllerInitialized() {
         Log.v(TAG, "Qt Android controller initialized")
         qtInitialized.complete(Unit)
+        MayakLaunch.liveConnect = liveConnectHandler
+        MayakLaunch.liveFailover = liveFailoverHandler
     }
 
     @Suppress("unused")
@@ -1140,6 +1201,45 @@ class AmneziaActivity : QtActivity() {
                 if (vpnProto == null) vpnProto = VpnProto.AWG
                 if (!isInBoundState) doBindService(createIfMissing = true)
             }
+        }
+    }
+
+    // Mayak soft recovery of a running managed backend. Never binds or creates the
+    // service: without a live service there is nothing to recover.
+    @Suppress("unused")
+    fun managedRecover(request: String, context: String, ticket: String) {
+        mainScope.launch {
+            if (!isServiceConnected) {
+                QtAndroidController.onManagedLifecycle(JSONObject().put("type", "managedRecovered")
+                    .put("owner", "MayakVpnAwgLifecycleV1").put("recoverRequestId", request)
+                    .put("healthContextId", context).put("recovered", false).toString())
+                return@launch
+            }
+            val msg = Action.MANAGED_RECOVER.packToMessage {
+                putString("recoverRequestId", request); putString("healthContextId", context)
+                putString("managedTicket", ticket)
+            }
+            vpnServiceMessenger.send(msg, activityMessenger)
+        }
+    }
+
+    // Mayak adoption of the running managed backend by a cold-started Qt owner. Never binds or
+    // creates the service: without a live service there is nothing to adopt.
+    @Suppress("unused")
+    fun managedAdopt(request: String, context: String, ticket: String) {
+        mainScope.launch {
+            if (!isServiceConnected) {
+                QtAndroidController.onManagedLifecycle(JSONObject().put("type", "managedAdopted")
+                    .put("owner", "MayakVpnAwgLifecycleV1").put("adoptRequestId", request)
+                    .put("healthContextId", context).put("adopted", false).toString())
+                return@launch
+            }
+            val msg = Action.MANAGED_ADOPT.packToMessage {
+                putString("adoptRequestId", request); putString("healthContextId", context)
+                putString("managedTicket", ticket)
+            }
+            pendingAdopts[request] = ticket to context
+            vpnServiceMessenger.send(msg, activityMessenger)
         }
     }
 

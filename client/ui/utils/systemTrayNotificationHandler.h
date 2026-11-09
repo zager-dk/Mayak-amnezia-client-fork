@@ -37,8 +37,12 @@ private:
     void onTrayActivated(QSystemTrayIcon::ActivationReason reason);
 
     void setTrayIcon(const QString &iconPath);
+    // Mayak tray set: state = off|connecting|on|error, theme follows the taskbar.
+    void setMayakTrayIcon(const QString &state);
+    static bool taskbarUsesLightTheme();
 
 private:
+    QString m_trayIconState = QStringLiteral("off");
     QMenu m_menu;
 #ifdef Q_OS_MAC
     MacOSStatusIcon* m_statusIcon = nullptr;

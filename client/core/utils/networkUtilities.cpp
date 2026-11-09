@@ -248,6 +248,26 @@ DWORD GetAdaptersAddressesWrapper(const ULONG Family,
 }
 #endif
 
+QStringList NetworkUtilities::systemDnsServersIpv4()
+{
+    QStringList out;
+#ifdef Q_OS_WIN
+    PIP_ADAPTER_ADDRESSES addresses = nullptr;
+    if (GetAdaptersAddressesWrapper(AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, NULL, addresses) != NO_ERROR)
+        return out;
+    for (auto a = addresses; a; a = a->Next) {
+        for (auto d = a->FirstDnsServerAddress; d; d = d->Next) {
+            const sockaddr *sa = d->Address.lpSockaddr;
+            if (!sa || sa->sa_family != AF_INET) continue;
+            const QHostAddress ip(sa);
+            if (!ip.isNull() && !out.contains(ip.toString())) out.append(ip.toString());
+        }
+    }
+    free(addresses);
+#endif
+    return out;
+}
+
 QPair<QString, QNetworkInterface> NetworkUtilities::getGatewayAndIface()
 {
 #ifdef Q_OS_WIN

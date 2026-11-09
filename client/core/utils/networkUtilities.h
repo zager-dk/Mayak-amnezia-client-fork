@@ -4,6 +4,7 @@
 #include <QRegularExpression>
 #include <QRegExp>
 #include <QString>
+#include <QStringList>
 #include <QHostAddress>
 #include <QNetworkReply>
 #include <QtNetwork/qnetworkinterface.h>
@@ -18,6 +19,8 @@ public:
     static bool checkIpSubnetFormat(const QString &ip);
     static bool checkIpv6Enabled();
     static QPair<QString, QNetworkInterface> getGatewayAndIface();
+    // Mayak: IPv4 DNS servers configured on the system's adapters (Windows; empty elsewhere).
+    static QStringList systemDnsServersIpv4();
     // Returns the Interface Index that could Route to dst
     static int AdapterIndexTo(const QHostAddress& dst);
 

@@ -13,6 +13,8 @@
 #include <QApplication>
 #include <QDesktopServices>
 #include <QIcon>
+#include <QSettings>
+#include <QStyleHints>
 #include <QWindow>
 
 #include "version.h"
@@ -53,8 +55,38 @@ SystemTrayNotificationHandler::SystemTrayNotificationHandler(QObject* parent) :
     connect(&m_systemTrayIcon, &QSystemTrayIcon::activated, this,
             &SystemTrayNotificationHandler::onTrayActivated);
     m_systemTrayIcon.setContextMenu(&m_menu);
+    // Re-pick the light/dark tray variant when the system theme changes.
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged, this,
+            [this](Qt::ColorScheme) { setMayakTrayIcon(m_trayIconState); });
 #endif
     setTrayState(Vpn::ConnectionState::Disconnected);
+}
+
+bool SystemTrayNotificationHandler::taskbarUsesLightTheme()
+{
+#ifdef Q_OS_WIN
+    // The taskbar follows the "system" (not app) theme; read-only registry lookup.
+    const QSettings personalize(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
+                                QSettings::NativeFormat);
+    return personalize.value(QStringLiteral("SystemUsesLightTheme"), 0).toInt() == 1;
+#else
+    return false;
+#endif
+}
+
+void SystemTrayNotificationHandler::setMayakTrayIcon(const QString &state)
+{
+    m_trayIconState = state;
+#ifdef Q_OS_MAC
+    // macOS status item: template image (dark silhouette, system tints it).
+    setTrayIcon(QStringLiteral(":/images/tray/mayak/%1-light-32.png").arg(state));
+#else
+    const QString theme = taskbarUsesLightTheme() ? QStringLiteral("light") : QStringLiteral("dark");
+    QIcon icon;
+    for (const int size : {16, 20, 24, 32, 40, 48})
+        icon.addFile(QStringLiteral(":/images/tray/mayak/%1-%2-%3.png").arg(state, theme).arg(size), QSize(size, size));
+    m_systemTrayIcon.setIcon(icon);
+#endif
 }
 
 SystemTrayNotificationHandler::~SystemTrayNotificationHandler() {
@@ -104,41 +136,28 @@ void SystemTrayNotificationHandler::onTrayActivated(QSystemTrayIcon::ActivationR
 
 void SystemTrayNotificationHandler::setTrayState(Vpn::ConnectionState state)
 {
-    QString resourcesPath = ":/images/tray/%1";
-
+    // Mayak: "on" only for a confirmed tunnel; every transition shows "connecting".
     switch (state) {
     case Vpn::ConnectionState::Disconnected:
-        setTrayIcon(QString(resourcesPath).arg(DisconnectedTrayIconName));
+        setMayakTrayIcon(QStringLiteral("off"));
         m_trayActionConnect->setEnabled(true);
         m_trayActionDisconnect->setEnabled(false);
         break;
     case Vpn::ConnectionState::Preparing:
-        setTrayIcon(QString(resourcesPath).arg(DisconnectedTrayIconName));
-        m_trayActionConnect->setEnabled(false);
-        m_trayActionDisconnect->setEnabled(true);
-        break;
     case Vpn::ConnectionState::Connecting:
-        setTrayIcon(QString(resourcesPath).arg(DisconnectedTrayIconName));
+    case Vpn::ConnectionState::Disconnecting:
+    case Vpn::ConnectionState::Reconnecting:
+        setMayakTrayIcon(QStringLiteral("connecting"));
         m_trayActionConnect->setEnabled(false);
         m_trayActionDisconnect->setEnabled(true);
         break;
     case Vpn::ConnectionState::Connected:
-        setTrayIcon(QString(resourcesPath).arg(ConnectedTrayIconName));
-        m_trayActionConnect->setEnabled(false);
-        m_trayActionDisconnect->setEnabled(true);
-        break;
-    case Vpn::ConnectionState::Disconnecting:
-        setTrayIcon(QString(resourcesPath).arg(DisconnectedTrayIconName));
-        m_trayActionConnect->setEnabled(false);
-        m_trayActionDisconnect->setEnabled(true);
-        break;
-    case Vpn::ConnectionState::Reconnecting:
-        setTrayIcon(QString(resourcesPath).arg(DisconnectedTrayIconName));
+        setMayakTrayIcon(QStringLiteral("on"));
         m_trayActionConnect->setEnabled(false);
         m_trayActionDisconnect->setEnabled(true);
         break;
     case Vpn::ConnectionState::Error:
-        setTrayIcon(QString(resourcesPath).arg(ErrorTrayIconName));
+        setMayakTrayIcon(QStringLiteral("error"));
         m_trayActionConnect->setEnabled(true);
         m_trayActionDisconnect->setEnabled(false);
         break;
@@ -146,7 +165,7 @@ void SystemTrayNotificationHandler::setTrayState(Vpn::ConnectionState state)
     default:
         m_trayActionConnect->setEnabled(false);
         m_trayActionDisconnect->setEnabled(true);
-        setTrayIcon(QString(resourcesPath).arg(DisconnectedTrayIconName));
+        setMayakTrayIcon(QStringLiteral("off"));
     }
 
     //#ifdef Q_OS_MAC
@@ -169,8 +188,7 @@ void SystemTrayNotificationHandler::notify(NotificationHandler::Message type,
   Q_UNUSED(timerMsec);
   m_statusIcon->showMessage(title, message);
 #else
-  QIcon icon(ConnectedTrayIconName);
-  m_systemTrayIcon.showMessage(title, message, icon, timerMsec);
+  m_systemTrayIcon.showMessage(title, message, m_systemTrayIcon.icon(), timerMsec);
 #endif
 }
 

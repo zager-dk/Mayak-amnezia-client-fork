@@ -225,6 +225,10 @@ set(COMMON_FILES_CPP
     ${CLIENT_ROOT_DIR}/core/controllers/api/mayakAdmissionClient.cpp
     ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelProbe.h
     ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelProbe.cpp
+    ${CLIENT_ROOT_DIR}/core/utils/mayakSplitTunneling.h
+    ${CLIENT_ROOT_DIR}/core/utils/mayakSplitTunneling.cpp
+    ${CLIENT_ROOT_DIR}/core/utils/mayakDeviceIdentity.h
+    ${CLIENT_ROOT_DIR}/core/utils/mayakDeviceIdentity.cpp
     ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelInterfaceResolver.h
     ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelInterfaceResolver.cpp
 )

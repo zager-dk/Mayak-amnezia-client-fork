@@ -23,6 +23,8 @@
 
 #ifdef Q_OS_ANDROID
     #include "platforms/android/android_controller.h"
+    #include <QGuiApplication>
+    #include <QHostAddress>
     #include <QThread>
 
 #endif
@@ -31,11 +33,137 @@
     #include "platforms/ios/ios_controller.h"
 #endif
 
+#include "core/utils/mayakSplitTunneling.h"
 #include "core/utils/networkUtilities.h"
+#include <QCoreApplication>
+#include <QHash>
+#include <functional>
+#include <memory>
+#include <QJsonArray>
+#ifdef Q_OS_ANDROID
+#include <QJniEnvironment>
+#include <QJniObject>
+#endif
 #include "core/utils/serverConfigUtils.h"
 #include "vpnConnection.h"
 
 using namespace ProtocolUtils;
+
+namespace {
+// Identifiers the fork's app split list may use for this app.
+QStringList mayakSelfAppIds()
+{
+#ifdef Q_OS_ANDROID
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    const QString package = context.isValid() ? context.callObjectMethod<jstring>("getPackageName").toString() : QString();
+    return package.isEmpty() ? QStringList() : QStringList{package};
+#else
+    return {QCoreApplication::applicationFilePath()};
+#endif
+}
+
+// «Россия напрямую» strategy. Route exclusion: Android 13+ (VpnService.Builder.excludeRoute)
+// and Windows (daemon exclusion routes); older Android gets the complement as included routes.
+bool mayakExcludeRoutesSupported()
+{
+#ifdef Q_OS_ANDROID
+    return QJniObject::getStaticField<jint>("android/os/Build$VERSION", "SDK_INT") >= 33;
+#else
+    return true;
+#endif
+}
+
+// Route budgets: the embedded list is coarsened (smallest Russian pieces dropped, they stay in
+// the VPN) until the platform gets at most this many routes.
+// Android (measured r14, 06.11.2026): every route lands in the VPN network's LinkProperties
+// (~84 bytes each), which the system sends to every app with a network callback. 8 672 routes
+// made it ~730 KB, overflowed binder (VPN service DeadSystemException, app ANR); 685 routes still
+// lost a few ~97 KB callbacks to frozen apps. 400 keeps it near 35-40 KB.
+// Windows: the daemon installs every exclusion route before the peer, each with a full routing
+// table pass, inside an 8 s attempt (independent review 3): kept equally small until measured.
+// Android 9-12 (no route exclusion) gets the complement, which the priority networks fragment:
+// it does not fit 400 even at /8 (612), so it gets 700 (689 routes, the size measured fine in r16).
+int mayakRussiaRouteBudget(bool excludeRoutes)
+{
+    return excludeRoutes ? 400 : 700;
+}
+
+#ifdef Q_OS_ANDROID
+// An app removed after it was chosen for split tunneling makes VpnService.Builder throw
+// (NameNotFoundException) and every connect fail: keep only installed packages.
+void mayakDropUninstalledApps(QJsonObject &config)
+{
+    const QJsonArray apps = config.value(amnezia::configKey::splitTunnelApps).toArray();
+    if (apps.isEmpty()) return;
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    const QJniObject pm = context.isValid()
+        ? context.callObjectMethod("getPackageManager", "()Landroid/content/pm/PackageManager;") : QJniObject();
+    if (!pm.isValid()) return;
+    QJsonArray kept;
+    for (const auto &v : apps) {
+        QJniEnvironment env;
+        const QJniObject info = pm.callObjectMethod("getApplicationInfo",
+            "(Ljava/lang/String;I)Landroid/content/pm/ApplicationInfo;",
+            QJniObject::fromString(v.toString()).object<jstring>(), jint(0));
+        const bool missing = env.checkAndClearExceptions() || !info.isValid();
+        if (!missing) kept.append(v);
+    }
+    if (kept.size() == apps.size()) return;
+    qInfo().noquote() << QStringLiteral("MayakNet event=split_apps_missing count=%1").arg(apps.size() - kept.size());
+    config.insert(amnezia::configKey::splitTunnelApps, kept);
+    if (kept.isEmpty()) config.insert(amnezia::configKey::appSplitTunnelType, 0);
+}
+#endif
+
+// Desktop passes the app list as excluded apps in every mode; Android honours the mode.
+bool mayakDesktopAppList()
+{
+#ifdef Q_OS_ANDROID
+    return false;
+#else
+    return true;
+#endif
+}
+
+// Resolves the probe's echo hosts to IPv4 (system DNS, before the new tunnel exists). Calls done
+// exactly once on the context's thread, with the endpoints interleaved by host.
+void resolveMayakProbeEndpoints(QObject *context, int timeoutMs,
+                                std::function<void(QList<mayak::split::ProbeEndpoint>)> done)
+{
+    struct State {
+        QStringList hosts;
+        QHash<QString, QList<mayak::split::ProbeEndpoint>> byHost;
+        int pending = 0;
+        bool finished = false;
+        std::function<void(QList<mayak::split::ProbeEndpoint>)> done;
+    };
+    auto st = std::make_shared<State>();
+    st->hosts = MayakTunnelProbe::echoHosts();
+    st->pending = int(st->hosts.size());
+    st->done = std::move(done);
+    auto finish = [st] {
+        if (st->finished) return;
+        st->finished = true;
+        QList<mayak::split::ProbeEndpoint> out;
+        for (int i = 0; i < 2; ++i)
+            for (const auto &host : st->hosts)
+                if (st->byHost.value(host).size() > i) out.append(st->byHost.value(host).at(i));
+        qInfo().noquote() << QStringLiteral("MayakNet event=split_probe_resolve endpoints=%1").arg(out.size());
+        if (st->done) st->done(out);
+    };
+    if (st->pending == 0 || timeoutMs <= 0) { QTimer::singleShot(0, context, finish); return; }
+    QTimer::singleShot(timeoutMs, context, finish);
+    for (const auto &host : st->hosts) {
+        QHostInfo::lookupHost(host, context, [st, host, finish](const QHostInfo &info) {
+            if (st->finished) return;
+            for (const auto &address : info.addresses())
+                if (address.protocol() == QAbstractSocket::IPv4Protocol)
+                    st->byHost[host].append({host, address.toString()});
+            if (--st->pending == 0) finish();
+        });
+    }
+}
+} // namespace
 
 struct VpnConnection::ManagedBackend {
     MayakBackendBridge::Ticket ticket;
@@ -43,6 +171,12 @@ struct VpnConnection::ManagedBackend {
     QSharedPointer<VpnProtocol> protocol;
     QPointer<MayakTunnelProbe> probe;
     QString inspectedIdentity;
+    // Adoption handed this backend from `adoptedFrom` (recovery) to `ticket`. If the owner never
+    // learned of the hand-over (cancelled/late reply), it still stops with the recovery ticket.
+    MayakBackendBridge::Ticket adoptedFrom;
+    // Split tunneling (sites): the echo endpoints routed through this backend's VPN.
+    QList<mayak::split::ProbeEndpoint> probeEndpoints;
+    quint64 endpointsGeneration = 0; // a late DNS answer of an older start/adopt must not overwrite
     std::function<void(MayakBackendBridge::Ticket, AwgTunnelHealth)> health;
     MayakBackendBridge::Done event;
 };
@@ -422,6 +556,11 @@ void VpnConnection::appendKillSwitchConfig()
 
 void VpnConnection::appendSplitTunnelingConfig()
 {
+    appendSplitTunnelingConfig(m_vpnConfiguration);
+}
+
+void VpnConnection::appendSplitTunnelingConfig(QJsonObject &config) const
+{
     if (!m_appSettingsRepository) {
         qCritical() << "VpnConnection::appendSplitTunnelingConfig: repositories not initialized";
         return;
@@ -430,14 +569,14 @@ void VpnConnection::appendSplitTunnelingConfig()
     bool allowSiteBasedSplitTunneling = true;
 
     // this block is for old native configs and for old self-hosted configs
-    auto protocolName = m_vpnConfiguration.value(configKey::vpnProto).toString();
+    auto protocolName = config.value(configKey::vpnProto).toString();
     if (protocolName == ProtocolUtils::protoToString(Proto::Awg) || protocolName == ProtocolUtils::protoToString(Proto::WireGuard)) {
         allowSiteBasedSplitTunneling = false;
-        auto configData = m_vpnConfiguration.value(protocolName + "_config_data").toObject();
+        auto configData = config.value(protocolName + "_config_data").toObject();
         if (configData.value(configKey::allowedIps).isString()) {
             QJsonArray allowedIpsJsonArray = QJsonArray::fromStringList(configData.value(configKey::allowedIps).toString().split(", "));
             configData.insert(configKey::allowedIps, allowedIpsJsonArray);
-            m_vpnConfiguration.insert(protocolName + "_config_data", configData);
+            config.insert(protocolName + "_config_data", configData);
         } else if (configData.value(configKey::allowedIps).isUndefined()) {
             auto nativeConfig = configData.value(configKey::config).toString();
             auto nativeConfigLines = nativeConfig.split("\n");
@@ -450,7 +589,7 @@ void VpnConnection::appendSplitTunnelingConfig()
                         allowedIpsJsonArray.append(allowedIp.trimmed());
                     }
                     configData.insert(configKey::allowedIps, allowedIpsJsonArray);
-                    m_vpnConfiguration.insert(protocolName + "_config_data", configData);
+                    config.insert(protocolName + "_config_data", configData);
                     break;
                 }
             }
@@ -465,7 +604,7 @@ void VpnConnection::appendSplitTunnelingConfig()
                         && persistentKeepaliveString.first().trimmed() == QStringLiteral("PersistentKeepalive")) {
                     configData.insert(configKey::persistentKeepAlive,
                                       persistentKeepaliveString.mid(1).join(QStringLiteral("=")).trimmed());
-                    m_vpnConfiguration.insert(protocolName + "_config_data", configData);
+                    config.insert(protocolName + "_config_data", configData);
                     break;
                 }
             }
@@ -506,14 +645,14 @@ void VpnConnection::appendSplitTunnelingConfig()
                 routeMode = amnezia::RouteMode::VpnAllSites;
             } else if (routeMode == amnezia::RouteMode::VpnOnlyForwardSites) {
                 // Allow traffic to Amnezia DNS
-                sitesJsonArray.append(m_vpnConfiguration.value(configKey::dns1).toString());
-                sitesJsonArray.append(m_vpnConfiguration.value(configKey::dns2).toString());
+                sitesJsonArray.append(config.value(configKey::dns1).toString());
+                sitesJsonArray.append(config.value(configKey::dns2).toString());
             }
         }
     }
 
-    m_vpnConfiguration.insert(configKey::splitTunnelType, routeMode);
-    m_vpnConfiguration.insert(configKey::splitTunnelSites, sitesJsonArray);
+    config.insert(configKey::splitTunnelType, routeMode);
+    config.insert(configKey::splitTunnelSites, sitesJsonArray);
 
     amnezia::AppsRouteMode appsRouteMode = amnezia::AppsRouteMode::VpnAllApps;
     QJsonArray appsJsonArray;
@@ -530,8 +669,8 @@ void VpnConnection::appendSplitTunnelingConfig()
         }
     }
 
-    m_vpnConfiguration.insert(configKey::appSplitTunnelType, appsRouteMode);
-    m_vpnConfiguration.insert(configKey::splitTunnelApps, appsJsonArray);
+    config.insert(configKey::appSplitTunnelType, appsRouteMode);
+    config.insert(configKey::splitTunnelApps, appsJsonArray);
 
     qDebug() << QString("Site split tunneling is %1, route mode is %2")
                         .arg(m_appSettingsRepository->isSitesSplitTunnelingEnabled() ? "enabled" : "disabled")
@@ -539,6 +678,57 @@ void VpnConnection::appendSplitTunnelingConfig()
     qDebug() << QString("App split tunneling is %1, route mode is %2")
                         .arg(m_appSettingsRepository->isAppsSplitTunnelingEnabled() ? "enabled" : "disabled")
                         .arg(appsRouteMode);
+}
+
+namespace {
+QStringList siteListIps(const QVariantMap &sites)
+{
+    QStringList out;
+    for (auto i = sites.constBegin(); i != sites.constEnd(); ++i) {
+        if (NetworkUtilities::checkIpSubnetFormat(i.key())) { out.append(i.key()); continue; }
+        for (const QString &ip : SecureAppSettingsRepository::siteIpList(i.value()))
+            if (NetworkUtilities::checkIpSubnetFormat(ip)) out.append(ip);
+    }
+    return out;
+}
+
+struct EmbeddedRussia { mayak::split::Ipv4Ranges all, priority; };
+const EmbeddedRussia &embeddedRussia()
+{
+    static const EmbeddedRussia list = [] {
+        EmbeddedRussia r;
+        QFile f(QStringLiteral(":/mayak/ru_ipv4.txt"));
+        if (!f.open(QIODevice::ReadOnly)) { qWarning() << "MayakNet event=russia_list_missing"; return r; }
+        r.all = mayak::split::parseIpv4List(f.readAll(), &r.priority);
+        return r;
+    }();
+    return list;
+}
+} // namespace
+
+bool VpnConnection::appendMayakRussiaDirectConfig(QJsonObject &config, bool excludeRoutes, int routeBudget) const
+{
+    if (!m_appSettingsRepository || !m_appSettingsRepository->isMayakRussiaDirectEnabled()) return false;
+    mayak::split::RussiaDirectInput in;
+    in.russia = embeddedRussia().all;
+    in.priority = embeddedRussia().priority;
+    // Exceptions reuse the fork's two site lists: "only these via VPN" = always via VPN,
+    // "all except these" = always direct.
+    in.direct = siteListIps(m_appSettingsRepository->vpnSites(amnezia::RouteMode::VpnAllExceptSites));
+    in.viaVpn = siteListIps(m_appSettingsRepository->vpnSites(amnezia::RouteMode::VpnOnlyForwardSites));
+    const int userViaVpn = int(in.viaVpn.size());
+    // No DNS outside the VPN: the tunnel DNS, and on Windows also the adapters' own DNS servers
+    // (Windows may query every adapter's resolver; a Russian ISP resolver must not become direct).
+    in.viaVpn << config.value(amnezia::configKey::dns1).toString() << config.value(amnezia::configKey::dns2).toString();
+    in.viaVpn << NetworkUtilities::systemDnsServersIpv4();
+    in.excludeRoutes = excludeRoutes;
+    in.routeBudget = routeBudget;
+    const auto routes = mayak::split::russiaDirectRoutes(in);
+    mayak::split::applyRussiaDirect(config, routes);
+    qInfo().noquote() << QStringLiteral("MayakNet event=russia_direct exclude=%1 routes=%2 min_prefix=%3 over_budget=%4 priority_dropped=%7 exceptions_direct=%5 exceptions_vpn=%6")
+        .arg(excludeRoutes ? 1 : 0).arg(routes.routes).arg(routes.minPrefix).arg(routes.overBudget ? 1 : 0)
+        .arg(in.direct.size()).arg(userViaVpn).arg(routes.priorityDropped ? 1 : 0);
+    return true;
 }
 
 #ifdef Q_OS_ANDROID
@@ -727,7 +917,30 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
         if (t.gate->state.load() != B::StartGate::Pending) { done({t, B::Outcome::Cancelled}); return; }
         const QString proto = config.value("protocol").toString();
         if (proto != "awg" && proto != "wireguard") { done({t, B::Outcome::Failed, {}, {}, QStringLiteral("AWG required")}); return; }
-        s->ticket = t;
+        // Split tunneling: the fork's settings apply to Mayak sessions as well (they bypass
+        // connectToVpn), with the Mayak invariants that keep the tunnel proof possible.
+        self->appendSplitTunnelingConfig(config);
+#ifdef Q_OS_ANDROID
+        mayakDropUninstalledApps(config);
+#endif
+        const bool excludeRoutes = mayakExcludeRoutesSupported();
+        self->appendMayakRussiaDirectConfig(config, excludeRoutes, mayakRussiaRouteBudget(excludeRoutes));
+        const bool selfKept = mayak::split::keepSelfInTunnel(config, mayakSelfAppIds(), mayakDesktopAppList());
+        const auto routing = mayak::split::sitesRouting(config);
+        auto launch = [self, s, t, deadline, done, selfKept
+#ifdef Q_OS_ANDROID
+            , android
+#endif
+        ](QJsonObject config, QList<mayak::split::ProbeEndpoint> endpoints) {
+        if (!self || self->m_managedBackend != s) { done({t, B::Outcome::Cancelled}); return; }
+        if (s->ticket.valid() || self->m_vpnProtocol) { done({t, B::Outcome::Busy}); return; }
+        if (B::monotonicMillis() >= deadline) t.gate->cancel();
+        if (t.gate->state.load() != B::StartGate::Pending) { done({t, B::Outcome::Cancelled}); return; }
+        qInfo().noquote() << QStringLiteral("MayakNet event=split_config sites_mode=%1 apps_mode=%2 self_kept=%3 probe_endpoints=%4")
+            .arg(config.value(amnezia::configKey::splitTunnelType).toInt())
+            .arg(config.value(amnezia::configKey::appSplitTunnelType).toInt())
+            .arg(selfKept ? 1 : 0).arg(endpoints.size());
+        s->ticket = t; s->adoptedFrom = {}; s->probeEndpoints = endpoints; ++s->endpointsGeneration;
 #ifdef AMNEZIA_DESKTOP
         // Existing AWG protocol wrapper, never a second backend implementation.
         auto* wg = new WireguardProtocol(config);
@@ -779,6 +992,16 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
 #else
         done({t, B::Outcome::Unknown});
 #endif
+        };
+        if (routing == mayak::split::SitesRouting::AllSites) { launch(config, {}); return; }
+        // Site routing: the probe's echo hosts must be inside the VPN routes ("only listed")
+        // or outside the exclusions ("all except"); the probe then uses exactly these addresses.
+        const int budgetMs = int(qBound(qint64(0), qint64(deadline - B::monotonicMillis() - 3000), qint64(2500)));
+        resolveMayakProbeEndpoints(self, budgetMs, [launch, config](QList<mayak::split::ProbeEndpoint> resolved) {
+            QJsonObject routed = config;
+            const auto endpoints = mayak::split::applyProbeRoutes(routed, resolved);
+            launch(routed, endpoints);
+        });
     };
     port.cancel = [self
 #ifdef Q_OS_ANDROID
@@ -814,10 +1037,13 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
             qInfo() << "MayakStopPort result=confirmed_down reason=never_committed";
             done(result); return;
         }
-        if (!s || !s->ticket.same(t)) {
+        // N1: the recovery ticket an adoption replaced still names this very backend.
+        const bool viaAdoptedFrom = s && s->ticket.valid() && s->adoptedFrom.valid() && s->adoptedFrom.same(t);
+        if (!s || (!s->ticket.same(t) && !viaAdoptedFrom)) {
             qInfo() << "MayakStopPort result=unknown reason=owner_or_ticket_mismatch";
             done(result); return;
         }
+        if (viaAdoptedFrom) qInfo() << "MayakStopPort stage=adopted_from_recovery";
         result.expected = s->expected;
         const QString context = s->expected.id.isEmpty() ? s->inspectedIdentity : s->expected.id;
         const qint64 remainingMs = deadline - B::monotonicMillis();
@@ -832,7 +1058,8 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
             const bool requestMatch = request == result.requestId;
             const bool contextMatch = actual == (s->expected.id.isEmpty() ? s->inspectedIdentity : s->expected.id);
             const bool ownerMatch = self && self->m_managedBackend == s;
-            const bool ticketMatch = ownerMatch && s->ticket.same(result.ticket);
+            const bool ticketMatch = ownerMatch && (s->ticket.same(result.ticket) ||
+                (s->ticket.valid() && s->adoptedFrom.valid() && s->adoptedFrom.same(result.ticket)));
             if (!requestMatch || !contextMatch || !ticketMatch) {
                 qInfo() << "MayakStopPortAck accepted=false request_match=" << requestMatch
                         << "context_match=" << contextMatch << "owner_match=" << ownerMatch
@@ -847,7 +1074,7 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
             const auto retained = s->protocol;
             if (stopped) {
                 s->expected = {};
-                s->ticket = {}; s->inspectedIdentity.clear(); s->protocol.clear();
+                s->ticket = {}; s->adoptedFrom = {}; s->inspectedIdentity.clear(); s->protocol.clear();
                 if (s->event) s->event(result);
                 if (!self) return;
             }
@@ -934,6 +1161,7 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
         }
         auto* probe = new MayakTunnelProbe(self);
         s->probe = probe;
+        request.pinnedEndpoints = s->probeEndpoints;
         request.deadlineMs = int(qMin<qint64>(request.deadlineMs,qMax<qint64>(0,deadline-B::monotonicMillis())));
         connect(probe,&MayakTunnelProbe::finished,self,[self,s,t,done,probe](quint64,bool ok,MayakTunnelProbeProof proof,QString error) {
             probe->deleteLater();
@@ -943,5 +1171,166 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
         });
         probe->start(request);
     };
+#ifdef Q_OS_ANDROID
+    // Soft recovery: same ticket and proof context, new AWG backend transport.
+    port.recover = [self, android](B::Ticket t, QString nonce, B::Millis deadline, B::Done done) {
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        const auto s = self->m_managedBackend;
+        B::Result result{t, B::Outcome::Failed}; result.requestId = nonce;
+        if (!android || !s || !s->ticket.same(t) || s->expected.id.isEmpty()) { done(result); return; }
+        result.expected = s->expected;
+        const QString context = s->expected.id;
+        auto completed = std::make_shared<bool>(false);
+        auto link = std::make_shared<QMetaObject::Connection>();
+        *link = connect(android, &AndroidController::managedRecovered, self,
+            [self, s, t, result, done, completed, link, context](QString request, QString actual, bool recovered) mutable {
+            if (*completed || request != result.requestId || actual != context) return;
+            *completed = true; QObject::disconnect(*link);
+            const bool current = self && self->m_managedBackend == s && s->ticket.same(t);
+            result.outcome = recovered && current ? B::Outcome::Started : B::Outcome::Failed;
+            done(result);
+        });
+        QTimer::singleShot(int(qMax<qint64>(0, deadline - B::monotonicMillis())), self, [result, done, completed, link]() mutable {
+            if (*completed) return;
+            *completed = true; QObject::disconnect(*link);
+            result.outcome = B::Outcome::Deadline;
+            done(result);
+        });
+        QMetaObject::invokeMethod(android, [android, nonce, context, t] {
+            if (android) android->managedRecover(nonce, context, t.opaqueAttempt);
+        }, Qt::QueuedConnection);
+    };
+    port.observeNetwork = [self, android](QObject* receiver, std::function<void(B::Ticket, bool)> changed) {
+        if (!self || !android) return;
+        const QPointer<QObject> target(receiver);
+        connect(android, &AndroidController::managedNetworkChanged, self, [self, target, changed](QString context, bool available) {
+            if (!self || !target || !changed) return;
+            const auto s = self->m_managedBackend;
+            if (!s || !s->ticket.valid() || s->expected.id.isEmpty() || context != s->expected.id) return;
+            changed(s->ticket, available);
+        });
+    };
+    // Cold-start adoption: exchange the inspected recovery authority for the attempt's full
+    // ticket once the service confirms identity+ticket (and soft-replaces the backend).
+    port.adopt = [self, android](B::Ticket recovery, B::Ticket fresh, QString identity, QJsonObject config,
+                                 QString nonce, B::Millis deadline, B::Done done) {
+        if (!self) return;
+        Q_ASSERT(QThread::currentThread() == self->thread());
+        const auto s = self->m_managedBackend;
+        B::Result result{fresh, B::Outcome::Failed}; result.requestId = nonce;
+        if (!android || !s || !s->ticket.same(recovery) || s->inspectedIdentity.isEmpty() || s->inspectedIdentity != identity) {
+            done(result); return;
+        }
+        // Expected own-peer context exactly as AndroidController::start derives it.
+        const QString protocol = config.value("protocol").toString();
+        const QJsonObject peer = config.value(protocol + "_config_data").toObject();
+        QString host = peer.value("hostName").toString();
+        QHostAddress numericHost;
+        if (numericHost.setAddress(host)) host = numericHost.toString();
+        const AwgHealthContext expected{identity,
+            QString::fromLatin1(QByteArray::fromBase64(peer.value("server_pub_key").toString().toLatin1()).toHex()),
+            AwgHealthContext::endpointForHost(host, peer.value("port").toInt())};
+        if (expected.peerPublicKey.isEmpty() || expected.endpoint.isEmpty() || B::monotonicMillis() >= deadline) {
+            done(result); return;
+        }
+        result.expected = expected;
+        {
+            // Split tunneling (sites): the live backend was routed when it started. Re-resolve the
+            // echo hosts so the adoption proof uses addresses inside those routes; a proof that
+            // runs first, or a changed DNS answer, fails and the runtime replaces the backend.
+            QJsonObject routed = config;
+            self->appendSplitTunnelingConfig(routed);
+            const bool excludeRoutes = mayakExcludeRoutesSupported();
+            self->appendMayakRussiaDirectConfig(routed, excludeRoutes, mayakRussiaRouteBudget(excludeRoutes));
+            s->probeEndpoints.clear();
+            const quint64 generation = ++s->endpointsGeneration;
+            if (mayak::split::sitesRouting(routed) != mayak::split::SitesRouting::AllSites) {
+                const int budgetMs = int(qBound(qint64(0), qint64(deadline - B::monotonicMillis()), qint64(2500)));
+                resolveMayakProbeEndpoints(self, budgetMs, [self, s, routed, generation](QList<mayak::split::ProbeEndpoint> resolved) {
+                    QJsonObject applied = routed;
+                    const auto endpoints = mayak::split::applyProbeRoutes(applied, resolved);
+                    if (self && self->m_managedBackend == s && s->endpointsGeneration == generation) s->probeEndpoints = endpoints;
+                });
+            }
+        }
+        auto completed = std::make_shared<bool>(false);
+        auto link = std::make_shared<QMetaObject::Connection>();
+        *link = connect(android, &AndroidController::managedAdopted, self,
+            [self, s, recovery, fresh, expected, result, done, completed, link, nonce, deadline](QString request, QString context, bool adopted) mutable {
+            if (*completed || request != nonce || context != expected.id) return;
+            *completed = true; QObject::disconnect(*link);
+            const bool current = self && self->m_managedBackend == s && s->ticket.same(recovery);
+            if (adopted && current && B::monotonicMillis() < deadline && !fresh.gate->cancellationRequested.load()) {
+                s->adoptedFrom = recovery; // N1: a cancel racing this reply may still stop by recovery
+                s->ticket = fresh; s->expected = expected; // inspectedIdentity stays as stop-context fallback
+                result.outcome = B::Outcome::Started;
+            } else {
+                result.outcome = adopted ? B::Outcome::Deadline : B::Outcome::Failed; // recovery stays the authority
+            }
+            done(result);
+        });
+        QTimer::singleShot(int(qMax<qint64>(0, deadline - B::monotonicMillis())), self, [result, done, completed, link]() mutable {
+            if (*completed) return;
+            *completed = true; QObject::disconnect(*link);
+            result.outcome = B::Outcome::Deadline;
+            done(result);
+        });
+        connect(android, &AndroidController::awgTunnelHealthUpdated, self, [self, s, fresh](AwgTunnelHealth h) {
+            if (self && self->m_managedBackend == s && s->ticket.same(fresh) && s->expected.matches(h) && s->health) s->health(fresh, h);
+        });
+        connect(android, &AndroidController::managedDenied, self, [self, s, fresh](QString ticket, QString context) {
+            if (!self || self->m_managedBackend != s || !s->ticket.same(fresh) || ticket != fresh.opaqueAttempt || context != s->expected.id) return;
+            if (s->event) s->event({fresh, B::Outcome::Failed, s->expected, {}, QStringLiteral("permissionDenied")});
+        });
+        QMetaObject::invokeMethod(android, [android, nonce, expected, fresh] {
+            if (android) android->managedAdopt(nonce, expected, fresh.opaqueAttempt);
+        }, Qt::QueuedConnection);
+    };
+    port.observeUserStop = [self, android](QObject* receiver, std::function<void(B::Ticket)> stopped) {
+        if (!self || !android) return;
+        const QPointer<QObject> target(receiver);
+        connect(android, &AndroidController::managedUserStopped, self, [self, target, stopped](QString context) {
+            if (!self || !target || !stopped) return;
+            const auto s = self->m_managedBackend;
+            if (!s || !s->ticket.valid() || s->expected.id.isEmpty() || context != s->expected.id) return;
+            stopped(s->ticket);
+        });
+    };
+    port.observeResume = [self, android](QObject* receiver, std::function<void(B::Ticket, bool, bool)> resumed) {
+        if (!self || !android) return;
+        const QPointer<QObject> target(receiver);
+        connect(android, &AndroidController::managedResumed, self,
+            [self, target, resumed](QString context, bool replaced, bool available) {
+            if (!self || !target || !resumed) return;
+            const auto s = self->m_managedBackend;
+            if (!s || !s->ticket.valid() || s->expected.id.isEmpty() || context != s->expected.id) return;
+            resumed(s->ticket, replaced, available);
+        });
+    };
+    port.observeFailover = [self, android](QObject* receiver, std::function<void(B::Ticket)> requested) {
+        if (!self || !android) return;
+        const QPointer<QObject> target(receiver);
+        connect(android, &AndroidController::managedFailoverRequested, self, [self, target, requested](QString context) {
+            if (!self || !target || !requested) return;
+            const auto s = self->m_managedBackend;
+            if (!s || !s->ticket.valid() || s->expected.id.isEmpty() || context != s->expected.id) return;
+            requested(s->ticket);
+        });
+    };
+    // Activity stopped (Qt reports Hidden/Suspended) = the service pauses health for this UI.
+    port.observeVisibility = [self](QObject* receiver, std::function<void(bool)> changed) {
+        auto* app = qobject_cast<QGuiApplication*>(QCoreApplication::instance());
+        if (!self || !app || !changed) return;
+        const QPointer<QObject> target(receiver);
+        const auto visibleOf = [](Qt::ApplicationState s) {
+            return s == Qt::ApplicationActive || s == Qt::ApplicationInactive;
+        };
+        connect(app, &QGuiApplication::applicationStateChanged, self, [target, changed, visibleOf](Qt::ApplicationState s) {
+            if (target) changed(visibleOf(s));
+        });
+        changed(visibleOf(app->applicationState())); // a session may begin while hidden (background connect)
+    };
+#endif
     return port;
 }

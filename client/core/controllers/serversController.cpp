@@ -88,6 +88,17 @@ void ServersController::removeServer(const QString &serverId)
     m_serversRepository->removeServer(serverId);
 }
 
+bool ServersController::setApiV2AuthKey(const QString &serverId, const QString &apiKey)
+{
+    if (apiKey.isEmpty()) return false;
+    auto cfg = m_serversRepository->apiV2Config(serverId);
+    if (!cfg.has_value()) return false;
+    if (cfg->authData.apiKey == apiKey) return true;
+    cfg->authData.apiKey = apiKey;
+    const QJsonObject json = cfg->toJson();
+    return m_serversRepository->editServerAndSync(serverId, json, serverConfigUtils::configTypeFromJson(json));
+}
+
 void ServersController::setDefaultServer(const QString &serverId)
 {
     m_serversRepository->setDefaultServer(serverId);

@@ -248,7 +248,8 @@ bool Coordinator::proofMatches(const OwnTunnelProof& p, const std::string& nonce
                                const Candidate& candidate, Millis started, Millis now) {
     return p.certificateValid && p.nonceMatched && p.nonce == nonce && !nonce.empty() &&
            p.peerHandshakeObserved && !p.ownPeerId.empty() && !p.counterReset &&
-           p.rxBytesAfter > p.rxBytesBefore && p.handshakeAt >= started && p.handshakeAt <= now &&
+           p.rxBytesAfter > p.rxBytesBefore && p.handshakeAt <= now &&
+           (p.handshakeAt >= started || (p.adoptedLiveSession && now - p.handshakeAt <= 180000)) &&
            std::find(candidate.expectedEgressIps.begin(), candidate.expectedEgressIps.end(), p.observedEgressIp) != candidate.expectedEgressIps.end();
 }
 void Coordinator::onProof(CycleId c, AttemptId a, ProofResult p) {
@@ -374,6 +375,12 @@ void Coordinator::onConnectedProbe(CycleId c, bool success, bool ownTelemetryDeg
         backendMayBeRunning_ = true;
         beginStop(StopPurpose::Finish, ErrorCategory::ProofFailed);
     }
+}
+
+void Coordinator::onOwnRepairExhausted(CycleId c) {
+    if (c != status_.cycle || status_.state != State::Connected) return;
+    backendMayBeRunning_ = true;
+    beginStop(StopPurpose::Finish, ErrorCategory::ProofFailed);
 }
 
 std::string Coordinator::makeNonce() {

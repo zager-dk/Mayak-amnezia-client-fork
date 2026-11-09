@@ -62,6 +62,50 @@ MayakBackendBridge::MayakBackendBridge(Port port, QObject* parent)
                 } else emit self->error(r);
             }, Qt::QueuedConnection);
         });
+        if (s->port.observeNetwork) s->port.observeNetwork(self, [self](Ticket t, bool available) {
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, t, available] {
+                if (!self) return;
+                const auto s = self->m_state;
+                if (!s->tickets.contains(t.opaqueAttempt) || !s->tickets.value(t.opaqueAttempt).same(t) ||
+                    t.gate->cancellationRequested.load()) return;
+                emit self->networkChanged(t, available);
+            }, Qt::QueuedConnection);
+        });
+        if (s->port.observeResume) s->port.observeResume(self, [self](Ticket t, bool replaced, bool available) {
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, t, replaced, available] {
+                if (!self) return;
+                const auto s = self->m_state;
+                if (!s->tickets.contains(t.opaqueAttempt) || !s->tickets.value(t.opaqueAttempt).same(t) ||
+                    t.gate->cancellationRequested.load()) return;
+                emit self->resumed(t, replaced, available);
+            }, Qt::QueuedConnection);
+        });
+        if (s->port.observeUserStop) s->port.observeUserStop(self, [self](Ticket t) {
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, t] {
+                if (!self) return;
+                const auto s = self->m_state;
+                if (!s->tickets.contains(t.opaqueAttempt) || !s->tickets.value(t.opaqueAttempt).same(t)) return;
+                emit self->userStopped(t);
+            }, Qt::QueuedConnection);
+        });
+        if (s->port.observeVisibility) s->port.observeVisibility(self, [self](bool visible) {
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, visible] { if (self) emit self->visibilityChanged(visible); },
+                                      Qt::QueuedConnection);
+        });
+        if (s->port.observeFailover) s->port.observeFailover(self, [self](Ticket t) {
+            if (!self) return;
+            QMetaObject::invokeMethod(self, [self, t] {
+                if (!self) return;
+                const auto s = self->m_state;
+                if (!s->tickets.contains(t.opaqueAttempt) || !s->tickets.value(t.opaqueAttempt).same(t) ||
+                    t.gate->cancellationRequested.load()) return;
+                emit self->failoverRequested(t);
+            }, Qt::QueuedConnection);
+        });
     }, Qt::QueuedConnection);
 }
 MayakBackendBridge::~MayakBackendBridge() {
@@ -201,6 +245,75 @@ void MayakBackendBridge::probe(Ticket t, MayakTunnelProbeRequest request, Millis
     QMetaObject::invokeMethod(s->port.owner, [s, self, t, request, deadline, finish] {
         s->port.probe(t, request, deadline, [self, finish](Ticket t, bool ok, MayakTunnelProbeProof p, QString e) {
             if (self) QMetaObject::invokeMethod(self, [finish, t, ok, p, e] { finish(t, ok, p, e); }, Qt::QueuedConnection);
+        });
+    }, Qt::QueuedConnection);
+}
+
+bool MayakBackendBridge::canRecover() const { return bool(m_state->port.recover); }
+void MayakBackendBridge::recover(Ticket t, Millis deadline, Done done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto s = m_state;
+    const QPointer<MayakBackendBridge> self(this);
+    const QString nonce = randomRequestId();
+    auto call = std::make_shared<Call>();
+    auto finish = [self, call, done, t, nonce, deadline](Result r) {
+        if (!self || call->finished || r.requestId != nonce || !r.ticket.same(t)) return;
+        call->finished = true;
+        if (monotonicMillis() >= deadline && r.outcome == Outcome::Started) r.outcome = Outcome::Deadline;
+        if (r.outcome == Outcome::Started && (!self->m_state->tickets.value(t.opaqueAttempt).same(t) ||
+            t.gate->cancellationRequested.load())) r.outcome = Outcome::Cancelled;
+        if (done) done(r);
+    };
+    const auto fail = [t, nonce](Outcome outcome) { Result r{t, outcome}; r.requestId = nonce; return r; };
+    // Only the committed, uncancelled current ticket may be recovered; never a recovery ticket.
+    if (!t.valid() || !s->tickets.value(t.opaqueAttempt).same(t) || t.gate->cancellationRequested.load() ||
+        t.gate->state.load() != StartGate::ActivationCommitted || t.opaqueAttempt.startsWith(QStringLiteral("recovery:"))) {
+        finish(fail(Outcome::Failed)); return;
+    }
+    QTimer::singleShot(delayTo(deadline), this, [finish, fail] { finish(fail(Outcome::Deadline)); });
+    if (!s->port.owner || !s->port.recover) { finish(fail(Outcome::Unknown)); return; }
+    QMetaObject::invokeMethod(s->port.owner, [s, self, t, nonce, deadline, finish] {
+        s->port.recover(t, nonce, deadline, [self, finish](Result r) {
+            if (self) QMetaObject::invokeMethod(self, [finish, r] { finish(r); }, Qt::QueuedConnection);
+        });
+    }, Qt::QueuedConnection);
+}
+
+bool MayakBackendBridge::canAdopt() const { return bool(m_state->port.adopt); }
+void MayakBackendBridge::adopt(Ticket recovery, Ticket fresh, QString identity, QJsonObject config, Millis deadline, Done done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto s = m_state;
+    const QPointer<MayakBackendBridge> self(this);
+    const QString nonce = randomRequestId();
+    auto call = std::make_shared<Call>();
+    auto finish = [self, call, done, recovery, fresh, nonce, deadline](Result r) {
+        if (!self || call->finished || r.requestId != nonce || !r.ticket.same(fresh)) return;
+        call->finished = true;
+        if (monotonicMillis() >= deadline && r.outcome == Outcome::Started) r.outcome = Outcome::Deadline;
+        if (r.outcome == Outcome::Started && fresh.gate->cancellationRequested.load()) r.outcome = Outcome::Cancelled;
+        if (r.outcome == Outcome::Started) {
+            // The single owned ticket becomes the attempt's full ticket.
+            self->m_state->tickets.remove(recovery.opaqueAttempt);
+            self->m_state->tickets.insert(fresh.opaqueAttempt, fresh);
+            self->m_state->contexts.insert(fresh.opaqueAttempt, r.expected);
+            emit self->activated(r);
+            if (!self) return;
+        } else fresh.gate->cancel();
+        if (done) done(r);
+    };
+    const auto fail = [fresh, nonce](Outcome outcome) { Result r{fresh, outcome}; r.requestId = nonce; return r; };
+    // Only the inspected recovery authority may be exchanged, once, for a never-used attempt ticket.
+    if (!recovery.valid() || !s->tickets.value(recovery.opaqueAttempt).same(recovery) ||
+        !recovery.opaqueAttempt.startsWith(QStringLiteral("recovery:")) || identity.isEmpty() ||
+        !fresh.valid() || fresh.opaqueAttempt.startsWith(QStringLiteral("recovery:")) ||
+        s->tickets.contains(fresh.opaqueAttempt) || !fresh.gate->commit()) {
+        finish(fail(Outcome::Failed)); return;
+    }
+    QTimer::singleShot(delayTo(deadline), this, [finish, fail] { finish(fail(Outcome::Deadline)); });
+    if (!s->port.owner || !s->port.adopt) { finish(fail(Outcome::Unknown)); return; }
+    QMetaObject::invokeMethod(s->port.owner, [s, self, recovery, fresh, identity, config, nonce, deadline, finish] {
+        s->port.adopt(recovery, fresh, identity, config, nonce, deadline, [self, finish](Result r) {
+            if (self) QMetaObject::invokeMethod(self, [finish, r] { finish(r); }, Qt::QueuedConnection);
         });
     }, Qt::QueuedConnection);
 }

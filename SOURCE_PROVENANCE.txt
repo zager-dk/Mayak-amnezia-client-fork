@@ -1,14 +1,156 @@
-MayakVPN 5.1.0.16 BUILD_ONLY source provenance
-Immutable base ZIP SHA-256: 2e465d5143edffa37857c88b690a207fa64f767d3260ce8db4eedad8f16a692c
-Immutable published15 manifest SHA-256: cd420be60e82493396297efbb4a3f10b31b07161cfefe0611d2d80346846a9f2
-Accepted UI16 manifest SHA-256: 7db1e558b59af0fd0aa2a6b777755a842725f8c5a1178eaaa06254b4893e3d7a
-UI16 delta paths and hashes (all from the explicit accepted manifest):
-  client/ui/qml/Components/ConnectButton.qml: bf7a56a1aeca046799c29d56a04f78e4dd2eae8309dda134c5410f6ead06bf1d
-  client/ui/qml/MayakCity/MayakCityScene.qml: 8cb1fb0a0425a77bbfb67efcebd20ccb43de4d5f795d1382ab5212ea0de40c9f
-  client/ui/qml/MayakCity/icons/moon-day.svg: edcf4983254433bd095ad71c3551f16c13190fc149956735b37fdb1f9a38719a
-  client/ui/qml/MayakCity/icons/moon.svg: 04acbb622ec82e2900124d0b31fbd0fe477795c47d482d1cd59a406fb680e472
-  client/ui/qml/MayakCity/icons/sun-day.svg: 15287757baeae57e53663b59866836da53959c39d59b602ca43c07754f149e84
-  client/ui/qml/MayakCity/icons/sun.svg: ba1a702cc4ffc662104d403c1d6ba7554eae01d9f3541e1c416638226474eab0
-  client/ui/qml/Pages2/PageHome.qml: 338a2a90ea12e2c4bab711d05b2ba28dbd9abd3ab901eeb525654e9d107aa84d
-  client/ui/qml/qml.qrc: fd7d3a7564099eeb51a20e471ae89f3f5eaf62800c95284a4baa271f90d7dc0f
-No packaging or release approval is implied.
+MayakVPN 5.1.0.17 source provenance
+Base archive (published 5.1.0.16) SHA-256: 7cdd2bd41e0d3e5cd228c8893e4d541146867b443f0ba1ef0087e7681785739a
+Delta report SHA-256: 5a738839c1fe966bc13163fd43761de6e2eac6978c52ad94d19e674407d30c9a
+Overlaid files (kind, path, SHA-256):
+  changed client/CMakeLists.txt 5672ce5a5d980ade124f691f0a966025789814a0773900b5a92c770523ba2372
+  changed client/android/AndroidManifest.xml 7fbf732a441f769b91ac593bbbdee222d5261fead37b43515eebb8f7d2e11d0e
+  changed client/android/res/drawable/ic_amnezia_round.xml d1fc685a9f5aae5025623ce054ea0f5cd26a3f7b0b053fd49b5a4877256e3cc2
+  changed client/android/res/drawable/ic_launcher_background.xml 436c691ee8ae2906ff9c223f966597da8cf59dfef22a6dcd5f16f67100048297
+  added client/android/res/drawable/ic_mayak_status_on.xml cfa1283cc847948082e02b9dadc18b3942be09bce5d0e50bcdab349c0b9dd90a
+  changed client/android/res/mipmap-hdpi/ic_launcher_foreground.png 05b573ca40013568d5e4e78721bd56034dcf235137231191ff5df57914578779
+  changed client/android/res/mipmap-hdpi/ic_launcher_monochrome.png 82ba0eeea888e04f529e7a9b56dc39451e6edb346e2105b370d82aa1d6fb757c
+  changed client/android/res/mipmap-hdpi/icon.png c2e11a3ca226c4142ffc82f34f202ba7b97e47b9499f4bd33672605af2b8d52d
+  changed client/android/res/mipmap-hdpi/icon_round.png e4b21459fe65016de2913832154d94f9212c58f6f9ee66e6ffb9d1e32a56b387
+  added client/android/res/mipmap-ldpi/ic_launcher_foreground.png 9df4b38fc260fa471360e8a1e36f732774a2a4928cf3a26674e2b22eec249098
+  changed client/android/res/mipmap-ldpi/ic_launcher_monochrome.png c6548bf8a37296aabfd16136338a977924f3866e6aabf696d97029e3b2c63c82
+  changed client/android/res/mipmap-ldpi/icon.png ce134193ec02cef344fd0ca0c16ca2ea5c29f120e82a9946e41df18884255b6f
+  changed client/android/res/mipmap-ldpi/icon_round.png dc6ed3ea496ebb840306fe1226e15e6b85358d5d530333090360d8a1ac2a5fdd
+  changed client/android/res/mipmap-mdpi/ic_launcher_foreground.png a5e5369197f5dd08cfaa74cce95a093dacc63e2114af6b58bfc8408709a079fc
+  changed client/android/res/mipmap-mdpi/ic_launcher_monochrome.png 222dd31dea39108d5dff33a4f8232f157ed8da0d100db2697341b8821cb7d170
+  changed client/android/res/mipmap-mdpi/icon.png 3ce442a96a63b40afa84f5b8ad161deb630e680c94df45bc0489f0a77bd42777
+  changed client/android/res/mipmap-mdpi/icon_round.png cf63424e4c1cb190cf0119626507e20839c8322a4262436d2310029a9d94b605
+  changed client/android/res/mipmap-xhdpi/ic_launcher_foreground.png 62ed915d4304307d00a55059dacacb93e23a733dd567ef2362d081e331e4134a
+  changed client/android/res/mipmap-xhdpi/ic_launcher_monochrome.png ff22902345ccf2a6b100dfaccbaef21c8a693e1d4079a3c9e7d0fdfd52d776b2
+  changed client/android/res/mipmap-xhdpi/icon.png e398c32f694cff5a46ce268ec2ab9bc395f85896c5ed6cc3ede41ad2dad480f5
+  changed client/android/res/mipmap-xhdpi/icon_round.png d4fef5d58b7d77e16fe985cdb8ce4c8be3a7eff21aef57e9f6f7e197225992f7
+  changed client/android/res/mipmap-xxhdpi/ic_launcher_foreground.png 610d360f05dcf9becbb3960777a2d9e7bf8fd91ad97ed06e5442088210ab7b14
+  changed client/android/res/mipmap-xxhdpi/ic_launcher_monochrome.png 119ba49744930ea63dfcf7241cac6dcd6978829b84b0738a4b664b9e3d786504
+  changed client/android/res/mipmap-xxhdpi/icon.png 4d3e46804276918d2603044498187332e86513fd40d055f852ce01149aa2bf63
+  changed client/android/res/mipmap-xxhdpi/icon_round.png 73cdd537efc5e22ce18efcaaef2dfa4b606bc25422867b7bbe01080c692bac2a
+  changed client/android/res/mipmap-xxxhdpi/ic_launcher_foreground.png 01b8d9f309f1f53ee6f85d64c6735be2cff8356aaab03d4a3e395863289b406e
+  changed client/android/res/mipmap-xxxhdpi/ic_launcher_monochrome.png 3c3872ed0f68374924efed0f7dd4f191eeaf28ee7881dc00bea7ee56f4c6d2a3
+  changed client/android/res/mipmap-xxxhdpi/icon.png 336dcbb7357936680bc7659eaa663d19eae3f69098103ea1916ae696af46d61f
+  changed client/android/res/mipmap-xxxhdpi/icon_round.png b6428034663ce809aa752001c32058864f21b211d1e474a046eaccf8ec8978c7
+  changed client/android/src/org/amnezia/vpn/AmneziaActivity.kt ede91246de454c4bbdba963d4673d07e3509a56d83d5e66103118c3933112378
+  changed client/android/src/org/amnezia/vpn/AmneziaTileService.kt cdec9734406b64e661eb793c92e989fe91e8b28a635b06051a8f30ef9697983d
+  changed client/android/src/org/amnezia/vpn/AmneziaVpnService.kt 8ab9fd10207e61d546be8117f28800a28a3430a61502488d53be0d1d339d37b8
+  changed client/android/src/org/amnezia/vpn/IpcMessage.kt ff0bd811696a9087e6b79f85899db32585d6385615d3508a127cb05e511e8373
+  added client/android/src/org/amnezia/vpn/MayakConnectActivity.kt 9bfe5828743689b6d57a28dc6064b81a8daf13ba5db99c07a604b90a87d1a9a1
+  added client/android/src/org/amnezia/vpn/MayakFailoverReceiver.kt 752c650305f8568c2b8b241b4059cb6dbaaa3168b05920c794eaf221775473d2
+  added client/android/src/org/amnezia/vpn/MayakLaunch.kt b3f2ad80e45b21a10cd1797f997281d411998d7aa9a0633e217c148e545969d8
+  changed client/android/src/org/amnezia/vpn/ServiceNotification.kt 89594602c6abe2e490dda9a5f765d9d80399dcd5b4d439d89b29f3cb256fa142
+  changed client/android/utils/src/main/kotlin/net/NetworkState.kt 7f23f7f0d382640d3c7b13db53560e438b0a5d457116d47849d40317645da4ca
+  changed client/android/wireguard/src/main/kotlin/org/amnezia/vpn/protocol/wireguard/Wireguard.kt 87944211573b20fbaf45c5c98c5a5454e090e8954999b4abdd1f623d8d90d047
+  changed client/cmake/sources.cmake 0348a43739a34513e932963f546ff5d5df33f51181eae0f74240517ab7d2513e
+  changed client/core/controllers/api/mayakAdmissionClient.cpp 7530ee3b80291b864abcf26d8b2439bd56ce8dfbb197d91c768e1a5571da56d9
+  changed client/core/controllers/api/mayakAdmissionClient.h fe1f93589e834f71139aaa30880819a6f7bcc1a3714d78cb2650c3703aeb6f6a
+  changed client/core/controllers/coreController.cpp a38e504de56eafdad1dbf27ac04d9a9da2bf6fecb52c64252c2dde7ae71d5edb
+  changed client/core/controllers/coreSignalHandlers.cpp b68c930e9dfc84978eb6f4c36ffe17c1b999dd1fec82ca4df32a43f2e38a623b
+  changed client/core/controllers/mayakAutoConnectCoordinator.cpp cdd83a9b995c6d82bb6ee59b825b6610b89c33a4fa0fe18cca4de808388cc59d
+  changed client/core/controllers/mayakAutoConnectCoordinator.h 371b0f7d26957aaaf938e419445d79d9e7c817c6c51bf298c0cc8df278cdfba5
+  changed client/core/controllers/mayakAutoConnectRuntime.cpp 7ec8370938ed99925daf8857add5f09a6a9fcd7e3bc997064066fdfe20522ff9
+  changed client/core/controllers/mayakAutoConnectRuntime.h 4e8dafc7eb683792b359b91489791986b5bfa2925dac44983b0eb584f6bf44e3
+  changed client/core/controllers/mayakBackendBridge.cpp 9977e4853687373fd1bc625f8e28534a53a48a55c46de09aad68f60199345601
+  changed client/core/controllers/mayakBackendBridge.h 6d6ffe78b3df73f86494d3497b471b988569b9e765d84eb964e82a523be11488
+  changed client/core/controllers/serversController.cpp 3219e16c066abfb251249ba7df2431f0836f4606e644d177ae910cab819b7e6e
+  changed client/core/controllers/serversController.h 5f705a723f66ffe981188ff2a5622150f94d5caf6d8f8fc543c9cf36e6ed7172
+  changed client/core/repositories/secureAppSettingsRepository.cpp 2ef5adac441f65de6d6ea23654bad0618900b8097a1812514a4c50b997ee4161
+  changed client/core/repositories/secureAppSettingsRepository.h aab7811506bb7e1e02f4f1c02a1d07128625413a0951ec55f3e7bbf961ebf68f
+  added client/core/utils/mayakDeviceIdentity.cpp 38e31da6b2af58d4b38735b2cff483d79f286750da34282bb0cd7800c11c0c6e
+  added client/core/utils/mayakDeviceIdentity.h 98bbe28e6624dba42e94a290d2afd8a1a9dc1b46585a7d115a73dd943b52d591
+  added client/core/utils/mayakSplitTunneling.cpp a76bf5a86ebff950ccdc672c301908601caa209acae81a4975a17026455f9139
+  added client/core/utils/mayakSplitTunneling.h 6a5c929b20c0dd2c6a3e0b50111409465661bd65ed4eab37e7e3df1b52167e9c
+  changed client/core/utils/mayakTunnelProbe.cpp 415fc75a33425054cbcbc966c399a9792361a5023f4e5e77c2712965e23686b7
+  changed client/core/utils/mayakTunnelProbe.h fceef6996adc981b99f35fb03c18608acf49fe7c7427baf80f4d1af32047e8ca
+  changed client/core/utils/networkUtilities.cpp 706df3d394e90cd36cfa0b13e262038f41036dd0f0edb6dd3ffd47aedcf08577
+  changed client/core/utils/networkUtilities.h 93d0f121c923a8c500e1eb997edfe2f1e4dfe7ebe85ce7290f388a016ffb85fe
+  changed client/images/images.qrc 60c8cc48a8e5052cc3740a90abcf95f8e835bc63c6facf6280b9764830e5837e
+  added client/images/tray/mayak/connecting-dark-16.png abb8eac2b876fb833ff7391fd86698278ff0c49f1eb6710d6e9bcaedced069c2
+  added client/images/tray/mayak/connecting-dark-20.png 25f985678230b78daa866a1e5e291c1b6dbb62dd4a5b5a78b05918797ee39009
+  added client/images/tray/mayak/connecting-dark-24.png 8c363f8bccccae0ceca4bc35d35efdda3104718c3c906a3b91e305bd13058d37
+  added client/images/tray/mayak/connecting-dark-32.png b81897627cd04621adc0d51a14bf6836e392af461a2fd68f370028dc0093d25f
+  added client/images/tray/mayak/connecting-dark-40.png a70f60ed0803a2e70edbacdc086876287ea0af3343a039613d1f99a3f1969190
+  added client/images/tray/mayak/connecting-dark-48.png dbde8724d0597ce36252f305aa9e3e51a093e3fe8b19f80e3fc18f5f76f99060
+  added client/images/tray/mayak/connecting-light-16.png 5093ebd038ff66eb8c1b8cbd98b2969391eaca5ee9619094b7446a0c45d2e242
+  added client/images/tray/mayak/connecting-light-20.png 9bc16748a8698949bf1833ce39dd35f3e619f5f4e5afbd98b440689a0630ca56
+  added client/images/tray/mayak/connecting-light-24.png e6c2a26e20cf0bf63fa1fd19916918c1d57387a9e06a53f0742c70126ad86fef
+  added client/images/tray/mayak/connecting-light-32.png eb63fed1fa22535ab6511b9ee19a70032b4b90aaf322db59b38debf5871fbc13
+  added client/images/tray/mayak/connecting-light-40.png 13891d24cbafb7053f5fbb24cb27cb257c348324f753a355d3458b19655066ad
+  added client/images/tray/mayak/connecting-light-48.png ca9a2c37d7a619e9d458cbcc762135594f619ca784af61a2cbfe7f19fe174b98
+  added client/images/tray/mayak/error-dark-16.png f79b088437a48b5faa654b4c8548c37f0e83b8f66e769d973eeaa5f40e4765d3
+  added client/images/tray/mayak/error-dark-20.png b37d50203ae71e4e8f1aac51b8f1cb7500ef3704ef091f5d52f054fc81b7fca5
+  added client/images/tray/mayak/error-dark-24.png 5c66d7dd29d69fa73aa20afa954b6cd154cd326267a3d7e216784a663d77a05f
+  added client/images/tray/mayak/error-dark-32.png 43056aafa814cdd6055385581063a16f12361709d50128102b5ede200ac3a2b1
+  added client/images/tray/mayak/error-dark-40.png 90796ae05343b08fce75c38d6cad94fef61cfbd80622d90088ea5ba8737d6be4
+  added client/images/tray/mayak/error-dark-48.png 7ec842e029c1b27d9971a7484071f82fff23461c8c0fc43cb805bc8ef18f48b0
+  added client/images/tray/mayak/error-light-16.png e0b98dd6bac88bb1a8f796966621614a361da5acd904c0ce13875f45473d180d
+  added client/images/tray/mayak/error-light-20.png 6930cd7802d4d70226f2a1e787d38c4da6488b789b4d674098cdc9bed950286e
+  added client/images/tray/mayak/error-light-24.png b2c7238ab64a66e01533d6fb44be315b9f261363a9d971e2d46764bd6f2d5dcb
+  added client/images/tray/mayak/error-light-32.png fe7b24b3de059e6865bc83ee2e8894985e34347c7d0f6a979c05f262fe29e3cc
+  added client/images/tray/mayak/error-light-40.png e4e2040a349d0d274d57afe5211812ab5f7060b041bc55353cadf135167719b8
+  added client/images/tray/mayak/error-light-48.png c6fd36ee8a00a7f8eb73fdcd96f2fb3c73467ab4e21fed2395dc72a22437c07f
+  added client/images/tray/mayak/off-dark-16.png 7d4a83c25d22b4086065b5b1ad0e06cce3158ae23e02c765bbfb13ff52b03d28
+  added client/images/tray/mayak/off-dark-20.png cb3853ac8adb8d5afc7fa9ba799bcb1d5108fd8033e7f33fafd66b0d068b06a1
+  added client/images/tray/mayak/off-dark-24.png c838ecd0bbe2bfbf9ac895ab9bde5741d40d6a52b9a7bc81f979fcbe8c2b9e34
+  added client/images/tray/mayak/off-dark-32.png cde186b3d321fef1b98677f11b2e4d31f4e48128b59963561ae968f452d683d3
+  added client/images/tray/mayak/off-dark-40.png 5b21ae6c022e1de9645ede2b8e7f4579aec04eee0fe6a8a9d00fbf96fc55d083
+  added client/images/tray/mayak/off-dark-48.png 90bfe6d2457fa672d464f6e22fa4da3b051b46e8ce27329bd2951b96dbb107e4
+  added client/images/tray/mayak/off-light-16.png 72ca54aea578e33cea42e3a19aa050efb9a01d69466a63629aba9c3c8f220018
+  added client/images/tray/mayak/off-light-20.png 764d46ffc86638ef1dc98d365f52e849ec3a95b332d5b0efcc0cef1caf4152a4
+  added client/images/tray/mayak/off-light-24.png 6c449cf6eed05c97bee4d080c8cb80489cf01c4e37586105020f5f97f0eab7ee
+  added client/images/tray/mayak/off-light-32.png 44a6d992b6c7fcac9ed6c16882ab3e9ee89cae8538917a58b40853002c4e148d
+  added client/images/tray/mayak/off-light-40.png 58b23a78c72af3185d2332216d23d3e2b16fcf0dd8c459ec2cbce05e04720d09
+  added client/images/tray/mayak/off-light-48.png 223f246a724afa023c968ccb56857887c8cc08822be579967846d65b4f536a17
+  added client/images/tray/mayak/on-dark-16.png a261c0575a3646005072f7032627f1f3dff9a5e8f55cc5d1535b5636f026e4f7
+  added client/images/tray/mayak/on-dark-20.png 5af0d91e72f49910f2b42cce15f3c47d2110266d0d719d8bc01f9254ceb1e0d4
+  added client/images/tray/mayak/on-dark-24.png 3359604fa0c5f3c8167dc5be10d302679001c1fe28302f14c2fc6da53d809f6f
+  added client/images/tray/mayak/on-dark-32.png b3f3daa58a1f4da1636ddf481a5307c2bfa5da6961dc4ad45461eca2a2e56af5
+  added client/images/tray/mayak/on-dark-40.png 43cff0eaf3b3a4b8fe83695473c365049a127d5462b79539335ada03784c9b62
+  added client/images/tray/mayak/on-dark-48.png 39cbc6204d3475df7d0a9cffd55f261f5e66dec5e6ebaa0215be9e3a5f27424c
+  added client/images/tray/mayak/on-light-16.png 1cb487b96a551bc632fbda6f17a5e894652d01e45930d40b9e3596ad06d470eb
+  added client/images/tray/mayak/on-light-20.png 64631a987f3cc2e164b3a6ebf6d9fab81230eb2ab451782c7cd199707137d7cb
+  added client/images/tray/mayak/on-light-24.png 9c90ba0d57da60caf04cab925cf447f581eb3afb73f2a7600f6cd190f9cd9f36
+  added client/images/tray/mayak/on-light-32.png 47dace8035e7913bcd6129f9d134250ba14d52ebb4175d7d33d577a8eaf3c9aa
+  added client/images/tray/mayak/on-light-40.png 916eb701cceefcf248377204e9dfb17f46f673a231ac3416d19ed163b3c305d8
+  added client/images/tray/mayak/on-light-48.png bb398a9c514b7d22646820a8938119c1a7607ccee74317268ac47d9fbc7ac70e
+  changed client/platforms/android/android_controller.cpp 4b26cf26538fb835c7ffa180c8a71f1e4ac3c83592f833fa76e78f2afba7f174
+  changed client/platforms/android/android_controller.h 0697d9358fe3bdea4f70d30938a317fee1cd880b786e01dec43c45543f466c73
+  added client/resources/mayak/ru_ipv4.txt bd8014f5cbfc4943116a33ad5f10e396bb4247cdc900fd5c7a2de12be7362a6d
+  added client/resources/mayakRoutes.qrc caaadfc9f16041103886b45679458cff830b732ebd55b5ba2b16a236b1cc90f4
+  changed client/tests/CMakeLists.txt b2f5af12471aebf0703b597631109ec34b27e2fffb3d2d617f7d152025208a9f
+  changed client/tests/api/CMakeLists.txt 10dcf292fea51d585562a752832c8a22bda1ca7b7a564bd865c775783bf39b8d
+  changed client/tests/api/testGatewayServiceImport.cpp dca84ac1118844f4ee4ccf3ffd6e82c3a5be85a72d90184445defdd83509fa18
+  added client/tests/api/testMayakDeviceKey.cpp 41f144b213429622adb49147f7a8212124d51096061e2e742c46a45a400c3518
+  changed client/tests/api/testMayakRuntime.cpp 22769245f8b239fa699b6934a00bc6bc900f1ad3c4394ee4f60c4da5d2fab681
+  added client/tests/api/testMayakSplitTunneling.cpp cbb0d4d05b5ff6a29c06870eeaca6e6ee4a3ea2f7106d38e93b502c4cbe38341
+  changed client/ui/controllers/mayakInviteUiController.cpp a22843f1f860677cfce95125896038bf64b28fd1422b9db2934ea6dbd3b6ce1b
+  changed client/ui/controllers/mayakInviteUiController.h b53bc64940d8db144e07231ffe0b8d9621bd3a74458e3f529d0394f24c4a770a
+  added client/ui/controllers/mayakRoutingUiController.cpp 4b427888c1100cdf78bff4da2651819811622b98a3acc734d8334d58bc7a55e9
+  added client/ui/controllers/mayakRoutingUiController.h 60ff403bf6b415bb83e2d1e328727af6a0928eb93f6c0d3c585f239dd6925181
+  changed client/ui/qml/Components/HomeSplitTunnelingDrawer.qml 790ab7e1e56df60b36a475562c46e590e8d4da9a8ff8093ec7004afd60eb7cbf
+  added client/ui/qml/MayakCity/icons/gear-day.svg cac09c53077dd208020b484fc3d3c5b78a4ea28997b46bfee38d00d55866adf1
+  added client/ui/qml/MayakCity/icons/gear.svg 05708adad866aa04bc497d8479ecdc0335e34af835003d2ad6a397a105168ef0
+  changed client/ui/qml/Pages2/PageHome.qml 6b86b29036771dfb3b16aceb9cbc841ead36913e998cbcc0fe633f141973a2dc
+  changed client/ui/qml/Pages2/PageMayakInvite.qml e050955455e0359f06901d3e5099f169449262615f2f19d350866b3beefcd6d0
+  changed client/ui/qml/Pages2/PageSettings.qml 04c9af984ceef4f33d94fe5d5406f70b75b66b43249935ec06136c7309e40657
+  changed client/ui/qml/Pages2/PageSettingsAppSplitTunneling.qml df62e97969bc260df7285fe2dd2d8f775902051538e1ce8fdaad547e7fb14066
+  changed client/ui/qml/Pages2/PageSettingsSplitTunneling.qml b1325cf072966f09c81cc4f87713f0306556b3dfb68026d9113fd7c7ba37878f
+  added client/ui/qml/newComponents/Mayak/qmldir d00c45956481bd1bb67a1e07811a0a5abbd99c93324ceca88dcc16c81e591d26
+  changed client/ui/qml/qml.qrc 1cb03697dbae497089266a75ab813b8052cc26bf32c78057cebf94843ffce751
+  changed client/ui/utils/systemTrayNotificationHandler.cpp 84ec8f29c8d409276de0afe87d3dcf20af3ecf0a9560eeaa67c3bbf6eed10180
+  changed client/ui/utils/systemTrayNotificationHandler.h 784b51435e65185a68dac8f2fdb9440ba6df44e7499b2bae997b4308e07cad03
+  changed client/vpnConnection.cpp b7976c192d49bb7f9b0a3d907dcb198f90c0a2d367796bbb719261055f882b80
+  changed client/vpnConnection.h a4c847c2a7f781f19ea13cd92936bf19297301aa49c0ae8e114f65adcca27457
+  added mayak/tools/gen_android_icons.py 2db7877af04e4a37191cc9fc680c386df628ca94e27424089afe6f7d275a14a4
+  added mayak/tools/gen_ru_networks.py c493871a23a89c1e8d2255b87ce7d64de86edb334b9073423271e596de2ef149
+  added mayak/tools/gen_tray_icons.py bd17ae5807d82a05f5616e438efbb3801326aea8a40e3e5d4ba37f3632b707b7
+  added mayak/tools/ru_priority_domains.txt eada51d563a5ded773c7809a7f5ba4a9c98e4012544b9be28d2207fa82eade44
+  added mayak/tools/ru_priority_snapshot.json 999b5d25a65f2d1031dd595ec5d64bb68d28ffc5374ca9bf41c5a935b0aa167e
+Not included (build artefacts/binaries):
+  client/3rd/SortFilterProxyModel/.git
+  client/3rd/qtgamepad/.git
+  client/3rd/qtkeychain/.git
+  client/android/gradle/wrapper/gradle-wrapper.jar
+  client/android/xray/libXray/libxray.aar
+  mayak/tools/__pycache__/gen_ru_networks.cpython-313.pyc
+  mayak/tools/__pycache__/gen_tray_icons.cpython-313.pyc

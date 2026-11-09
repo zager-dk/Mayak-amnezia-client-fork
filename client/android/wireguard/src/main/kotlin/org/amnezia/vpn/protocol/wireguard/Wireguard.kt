@@ -165,6 +165,8 @@ open class Wireguard : Protocol() {
     private lateinit var scope: CoroutineScope
     private var statusJob: Job? = null
     @Volatile private var backendGeneration: Long = 0L
+    // Opaque Qt-owned proof context of the live backend; only Mayak managed recovery reuses it.
+    @Volatile private var activeHealthContextId: String? = null
     private val healthPublication = AwgHealthPublicationGate()
     private val mutableTunnelHealth = MutableStateFlow<AwgTunnelHealth?>(null)
     val tunnelHealth = mutableTunnelHealth.asStateFlow()
@@ -333,6 +335,7 @@ open class Wireguard : Protocol() {
         }
         val activation = AwgHealthActivation(tunnelHandle, backendGeneration, healthContextId,
             config.publicKeyHex, config.endpoint.toString())
+        activeHealthContextId = healthContextId
         healthPublication.activate(activation)
         launchStatusJob(config, activation)
     }
@@ -430,8 +433,36 @@ open class Wireguard : Protocol() {
         tunnelHandle == -1
     } catch (_: Exception) { false }
 
+    /**
+     * Mayak managed recovery: replace the live AWG backend (new handle, new UDP socket and
+     * source port) with the same config and the same Qt-owned proof context. The new TUN is
+     * established before the old handle is closed, so Android never drops the VPN and no
+     * traffic leaves outside it. Returns true only when a new backend is running.
+     */
+    fun managedRecover(vpnBuilder: Builder, protect: (Int) -> Boolean, expectedContextId: String): Boolean {
+        val config = this.config ?: return false
+        val context = activeHealthContextId ?: return false
+        if (context != expectedContextId || tunnelHandle == -1) return false
+        val ok = try {
+            start(config, vpnBuilder, protect, true, healthContextId = context)
+            tunnelHandle != -1
+        } catch (e: Exception) {
+            Log.e(TAG, "Managed recovery failed: ${e.javaClass.simpleName}")
+            false
+        }
+        if (!ok && tunnelHandle == -1) {
+            // The old backend is already closed and no new one runs: never stay "connected"
+            // without a tunnel. Report the honest state so the owner/notification can react.
+            healthPublication.invalidate()
+            activeHealthContextId = null
+            state.value = DISCONNECTED
+        }
+        return ok
+    }
+
     override fun stopVpn() {
         healthPublication.invalidate()
+        activeHealthContextId = null
         if (tunnelHandle == -1) {
             Log.w(TAG, "Tunnel already down")
             return

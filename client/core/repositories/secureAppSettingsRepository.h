@@ -57,6 +57,13 @@ public:
     bool isAppsSplitTunnelingEnabled() const;
     void setAppsSplitTunnelingEnabled(bool enabled);
 
+    // Mayak «Россия напрямую»: on by default until the user chooses; the choice is stored and
+    // survives updates (only a missing key means "not chosen yet").
+    bool isMayakRussiaDirectEnabled() const;
+    void setMayakRussiaDirectEnabled(bool enabled);
+    bool isMayakRussiaDirectNoticeShown() const;
+    void setMayakRussiaDirectNoticeShown(bool shown);
+
     QString getGatewayEndpoint(bool isTestPurchase = false) const;
     void setGatewayEndpoint(const QString &endpoint);
     void resetGatewayEndpoint();
@@ -99,6 +106,11 @@ public:
     bool setMayakSessionToken(const QString &token);
     bool isMayakManagedServer(const QString &serverId) const;
     bool markMayakManagedServer(const QString &serverId);
+    // Какой сервер Маяка в списке принадлежит устройству аккаунта (deviceId с сервера): при входе в другой аккаунт
+    // и обратно ключ меняется на месте только у «своей» подписки.
+    QString mayakServerForDevice(const QString &deviceId) const;
+    void setMayakServerForDevice(const QString &deviceId, const QString &serverId);
+    bool hasMayakDeviceServers() const;
     QStringList getReadNewsIds() const;
     void setReadNewsIds(const QStringList &ids);
 
@@ -128,6 +140,7 @@ signals:
     void appsRouteModeChanged(AppsRouteMode mode);
     void sitesSplitTunnelingEnabledChanged(bool enabled);
     void appsSplitTunnelingEnabledChanged(bool enabled);
+    void mayakRussiaDirectEnabledChanged(bool enabled);
     void useAmneziaDnsChanged(bool enabled);
     void saveLogsChanged(bool enabled);
     void screenshotsEnabledChanged(bool enabled);

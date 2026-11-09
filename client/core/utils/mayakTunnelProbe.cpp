@@ -272,6 +272,8 @@ QStringList openSslErrorCodeTokens(const QString &errorString) {
 
 MayakTunnelProbe::MayakTunnelProbe(QObject *parent) : QObject(parent) {}
 
+QStringList MayakTunnelProbe::echoHosts() { return Hosts; }
+
 bool MayakTunnelProbe::parseHttpResponse(const QByteArray &wire, QByteArray *body, QString *error) {
     return parseHttp(wire, body, error);
 }
@@ -307,6 +309,8 @@ public:
             m_request.localAddress.protocol() == QAbstractSocket::IPv4Protocol) {
             for (const auto &ip : m_request.expectedEgressIpv4)
                 if (!validIpv4(ip)) { finish(false, {}, "invalid expected egress IPv4"); return; }
+            for (const auto &e : m_request.pinnedEndpoints)
+                if (!Hosts.contains(e.host) || !validIpv4(e.ipv4)) { finish(false, {}, "invalid pinned endpoint"); return; }
         } else {
             finish(false, {}, "invalid probe request"); return;
         }
@@ -374,6 +378,7 @@ private:
             old->deleteLater();
         }
         if (!retrySourceBind && hostCount() <= m_hostIndex) { finish(false, {}, "all HTTPS echo endpoints failed"); return; }
+        if (!retrySourceBind) m_currentIpv4 = pinnedIpv4At(m_hostIndex);
         const QString host = retrySourceBind ? m_currentHost : hostAt(m_hostIndex++);
         if (!retrySourceBind) m_currentHost = host;
         m_endpointIndex = m_hostIndex;
@@ -624,6 +629,11 @@ private:
 #endif
         // Keep hostname verification/SNI and async DNS; the bound engine is
         // IPv4, so Qt must not replace it while selecting another protocol.
+        if (!m_currentIpv4.isEmpty()) {
+            // Split tunneling: connect to the routed address, verify the certificate for host.
+            m_socket->connectToHostEncrypted(m_currentIpv4, port, host, QIODevice::ReadWrite, QAbstractSocket::IPv4Protocol);
+            return;
+        }
         m_socket->connectToHostEncrypted(host, port, QIODevice::ReadWrite, QAbstractSocket::IPv4Protocol);
     }
 
@@ -685,13 +695,22 @@ private:
 #ifdef MAYAK_TUNNEL_PROBE_TESTING
         if (!m_request.testHost.isEmpty()) return 1;
 #endif
+        if (!m_request.pinnedEndpoints.isEmpty()) return int(m_request.pinnedEndpoints.size());
         return Hosts.size();
     }
     QString hostAt(int index) const {
 #ifdef MAYAK_TUNNEL_PROBE_TESTING
         if (!m_request.testHost.isEmpty()) return m_request.testHost;
 #endif
+        if (!m_request.pinnedEndpoints.isEmpty()) return m_request.pinnedEndpoints.at(index).host;
         return Hosts.at(index);
+    }
+    QString pinnedIpv4At(int index) const {
+#ifdef MAYAK_TUNNEL_PROBE_TESTING
+        if (!m_request.testHost.isEmpty()) return {};
+#endif
+        if (index < 0 || index >= m_request.pinnedEndpoints.size()) return {};
+        return m_request.pinnedEndpoints.at(index).ipv4;
     }
 
     QPointer<MayakTunnelProbe> m_owner;
@@ -703,6 +722,7 @@ private:
     QByteArray m_wire;
     int m_hostIndex = 0;
     QString m_currentHost;
+    QString m_currentIpv4;
 #ifdef MAYAK_TUNNEL_PROBE_TESTING
     int m_testSourceBindFailures = m_request.testSourceBindFailures;
     bool m_testIdentityDriftDuringBindWait = false;

@@ -422,7 +422,7 @@ private slots:
         SecureAppSettingsRepository appSettings(&secureSettings);
         MockNetworkAccessManager network;
         network.enqueue(200, authResponse(QStringLiteral("register-session")));
-        network.enqueue(503, QByteArrayLiteral("{}")); // app-key down after bearer persistence
+        network.enqueue(503, QByteArrayLiteral("{}")); // device-key down after bearer persistence
         network.enqueue(401, QByteArrayLiteral("{\"error\":\"invalid credentials\"}"));
         network.enqueue(200, authResponse(QStringLiteral("login-session")));
         network.enqueue(503, QByteArrayLiteral("{}"));
@@ -438,7 +438,7 @@ private slots:
         QCOMPARE(network.calls.at(0).url.path(), QStringLiteral("/api/auth/register"));
         QCOMPARE(QJsonDocument::fromJson(network.calls.at(0).body).object().value(QStringLiteral("invite")).toString(),
                  QStringLiteral("abc_DEF-012"));
-        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app/device-key"));
         QCOMPARE(appSettings.mayakSessionToken(), QStringLiteral("register-session"));
         QVERIFY(controller.accountMetadataKnown());
         QVERIFY(controller.accountHasPassword());
@@ -476,7 +476,7 @@ private slots:
         QVERIFY(controller.accountHasPassword());
         QCOMPARE(controller.accountEmail(), QStringLiteral("member@example.org"));
         QCOMPARE(network.calls.at(3).url.path(), QStringLiteral("/api/auth/login"));
-        QCOMPARE(network.calls.at(4).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(network.calls.at(4).url.path(), QStringLiteral("/api/app/device-key"));
 
         controller.bindCredentials(QStringLiteral("member@example.org"), QStringLiteral("correct horse battery"));
         QTRY_VERIFY_WITH_TIMEOUT(!controller.busy(), 5000);
@@ -525,8 +525,8 @@ private slots:
         expiredSession.retrySetup();
         QTRY_VERIFY_WITH_TIMEOUT(!expiredSession.busy(), 5000);
         QCOMPARE(expiryNetwork.calls.size(), 1);
-        QCOMPARE(expiryNetwork.calls.at(0).operation, QNetworkAccessManager::GetOperation);
-        QCOMPARE(expiryNetwork.calls.at(0).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(expiryNetwork.calls.at(0).operation, QNetworkAccessManager::PostOperation);
+        QCOMPARE(expiryNetwork.calls.at(0).url.path(), QStringLiteral("/api/app/device-key"));
         QVERIFY(expirySettings.mayakSessionToken().isEmpty());
         QVERIFY(!expiredSession.accountMetadataKnown());
         QVERIFY(!expiredSession.requiresFreshInvite());
@@ -534,7 +534,7 @@ private slots:
         expiredSession.login(QStringLiteral("member@example.org"), QStringLiteral("correct horse battery"));
         QTRY_VERIFY_WITH_TIMEOUT(!expiredSession.busy(), 5000);
         QCOMPARE(expiryNetwork.calls.at(1).url.path(), QStringLiteral("/api/auth/login"));
-        QCOMPARE(expiryNetwork.calls.at(2).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(expiryNetwork.calls.at(2).url.path(), QStringLiteral("/api/app/device-key"));
         QCOMPARE(expirySettings.mayakSessionToken(), QStringLiteral("fresh-login-session"));
 
         const QString staleOrg = QStringLiteral("MayakAuthStaleProvisionStandalone-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
@@ -673,7 +673,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(provisioner.pending.size(), 1, 5000);
         QCOMPARE(serversRepository.serversCount(), 1);
         QCOMPARE(provisionNetwork.calls.at(4).url.path(), QStringLiteral("/api/auth/login"));
-        QCOMPARE(provisionNetwork.calls.at(5).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(provisionNetwork.calls.at(5).url.path(), QStringLiteral("/api/app/device-key"));
         provisioner.completeNext(ErrorCode::NoError);
         QTRY_VERIFY_WITH_TIMEOUT(!onboarding.busy(), 5000);
         QCOMPARE(provisionSettings.mayakSessionToken(), QStringLiteral("relogin-session"));
@@ -1498,7 +1498,7 @@ private slots:
         QCOMPARE(requestBody.value(QStringLiteral("invite")).toString(), QStringLiteral("abc_DEF-012"));
         QCOMPARE(requestBody.value(QStringLiteral("email")).toString(), QStringLiteral("member@example.org"));
         QCOMPARE(requestBody.value(QStringLiteral("password")).toString(), QStringLiteral("correct horse battery"));
-        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app/device-key"));
         QCOMPARE(appSettings.mayakSessionToken(), QStringLiteral("email-session-token"));
         provisioner.completeNext(ErrorCode::NoError);
         QTRY_VERIFY_WITH_TIMEOUT(!controller.busy(), 5000);
@@ -1597,8 +1597,8 @@ private slots:
         QCOMPARE(network.calls.size(), 3);
         QCOMPARE(network.calls.at(0).operation, QNetworkAccessManager::PostOperation);
         QCOMPARE(network.calls.at(0).url.path(), QStringLiteral("/api/auth/invite"));
-        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app-key"));
-        QCOMPARE(network.calls.at(2).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app/device-key"));
+        QCOMPARE(network.calls.at(2).url.path(), QStringLiteral("/api/app/device-key"));
 
         provisioner.completeNext(ErrorCode::NoError);
         QTRY_VERIFY_WITH_TIMEOUT(!controller.busy(), 5000);
@@ -1633,9 +1633,9 @@ private slots:
         provisioner.completeNext(ErrorCode::NoError);
         QTRY_VERIFY_WITH_TIMEOUT(!controller.busy(), 5000);
         QCOMPARE(network.calls.at(0).url.path(), QStringLiteral("/api/auth/invite"));
-        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(network.calls.at(1).url.path(), QStringLiteral("/api/app/device-key"));
         QCOMPARE(network.calls.at(2).url.path(), QStringLiteral("/api/auth/login"));
-        QCOMPARE(network.calls.at(3).url.path(), QStringLiteral("/api/app-key"));
+        QCOMPARE(network.calls.at(3).url.path(), QStringLiteral("/api/app/device-key"));
     }
 
     void inviteDoesNotContinueWhenEncryptedStorageIsUnavailable()

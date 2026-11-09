@@ -32,6 +32,26 @@ public:
     QString message() const { return m_message; }
     QString connectionPhase() const { return m_connectionPhase; }
     QVariantMap exitLocation() const { return m_exitLocation; }
+    // Connected-state monitoring and Android soft recovery timing (milliseconds).
+    struct RecoveryTiming {
+        qint64 monitorMs = 10000;        // healthy tunnel probe interval
+        qint64 retryProbeMs = 3000;      // after a failed probe
+        qint64 probeDeadlineMs = 5000;
+        qint64 networkSettleMs = 2000;   // probe this long after a new validated network
+        qint64 noNetworkUiMs = 1500;     // OS reports no network: show it after this debounce
+        qint64 networkLostExpiryMs = 60000; // loss with no later network event stops blocking recovery
+        qint64 stuckRxMs = 8000;         // no RX this long + failed probe = stuck transport
+        qint64 stuckRxAfterNetworkMs = 4000;
+        qint64 networkRecentMs = 20000;
+        qint64 recoverDeadlineMs = 6000;
+        QList<qint64> recoverBackoffMs { 0, 10000, 30000 };
+        // Connect-time network failure (gateway unreachable, DNS, timeout): retry instead of
+        // an immediate error; one delay per retry, then the error is shown.
+        QList<qint64> connectRetryMs { 3000, 6000, 12000, 20000, 30000 };
+    };
+    static RecoveryTiming recoveryTiming();
+    static void setRecoveryTimingForTests(const RecoveryTiming& timing);
+    static void resetFailoverMemoryForTests();
 signals:
     void stateChanged(Vpn::ConnectionState state, const QString& message);
 private:

@@ -23,8 +23,8 @@ PageType {
     property bool pageEnabled
 
     Component.onCompleted: {
-        if (ConnectionController.isConnected) {
-            PageController.showNotificationMessage(qsTr("Cannot change split tunneling settings during active connection"))
+        if (ConnectionController.isConnected || ConnectionController.isConnectionInProgress) {
+            PageController.showNotificationMessage(qsTr("Только просмотр: изменять можно при выключенном Маяке"))
             root.pageEnabled = false
         } else {
             root.pageEnabled = true

@@ -1,17 +1,15 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Маяк: силуэт маяка (уведомление, плитка быстрых настроек, монохромный значок) -->
+<!-- Маяк: белый силуэт, окно фонаря пустое — не подключено (уведомление, плитка).
+     Сгенерировано mayak/tools/gen_android_icons.py из силуэта значка в трее. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:width="256dp"
-    android:height="256dp"
-    android:viewportWidth="256"
-    android:viewportHeight="256">
-  <path android:fillColor="#FFFFFF" android:pathData="M112,71L18,42L18,100Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M144,71L238,42L238,100Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M128,32L152,58L104,58Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M113,58L143,58Q146,58 146,61L146,81Q146,84 143,84L113,84Q110,84 110,81L110,61Q110,58 113,58Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M102.5,84L153.5,84Q156,84 156,86.5L156,90.5Q156,93 153.5,93L102.5,93Q100,93 100,90.5L100,86.5Q100,84 102.5,84Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M107.9,93L148.1,93L151.5,122L104.5,122Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M102.2,142L153.8,142L156.4,164L99.6,164Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M97.3,184L158.7,184L162.0,212L94.0,212Z"/>
-  <path android:fillColor="#FFFFFF" android:pathData="M83,210L173,210Q178,210 178,215L178,221Q178,226 173,226L83,226Q78,226 78,221L78,215Q78,210 83,210Z"/>
+    android:width="24dp"
+    android:height="24dp"
+    android:viewportWidth="32"
+    android:viewportHeight="32">
+  <path android:fillColor="#FFFFFF" android:fillAlpha="0.5" android:fillType="evenOdd" android:pathData="M14.7,1.5A1.3,1.3 0 1,0 17.3,1.5A1.3,1.3 0 1,0 14.7,1.5Z"/>
+  <path android:fillColor="#FFFFFF" android:fillAlpha="0.5" android:fillType="evenOdd" android:pathData="M15.4,2L16.6,2L16.6,4.6L15.4,4.6Z"/>
+  <path android:fillColor="#FFFFFF" android:fillAlpha="0.5" android:fillType="evenOdd" android:pathData="M10.5,8A5.5,4.4 0 0,1 21.5,8Z"/>
+  <path android:fillColor="#FFFFFF" android:fillAlpha="0.5" android:fillType="evenOdd" android:pathData="M12,8L20,8L20,14.5L12,14.5ZM13.6,9.6L13.6,12.9L18.4,12.9L18.4,9.6Z"/>
+  <path android:fillColor="#FFFFFF" android:fillAlpha="0.5" android:fillType="evenOdd" android:pathData="M9.5,14.5L22.5,14.5L22.5,16.8L9.5,16.8Z"/>
+  <path android:fillColor="#FFFFFF" android:fillAlpha="0.5" android:fillType="evenOdd" android:pathData="M11.4,16.8L20.6,16.8L23.2,31L8.8,31Z"/>
 </vector>

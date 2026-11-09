@@ -823,6 +823,22 @@ void AndroidController::managedInspect(const QString& request) {
     m_managedInspections.insert(request);
     callActivityMethod("managedInspect", "(Ljava/lang/String;)V", QJniObject::fromString(request).object<jstring>());
 }
+void AndroidController::managedRecover(const QString& request, const QString& context, const QString& ticket) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    m_managedRecovers.insert(request, context);
+    qInfo() << "MayakNet event=recover_dispatch";
+    callActivityMethod("managedRecover", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        QJniObject::fromString(request).object<jstring>(), QJniObject::fromString(context).object<jstring>(),
+        QJniObject::fromString(ticket).object<jstring>());
+}
+void AndroidController::managedAdopt(const QString& request, const AwgHealthContext& expected, const QString& ticket) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    m_managedAdopts.insert(request, {expected, ticket});
+    qInfo() << "MayakNet event=adopt_dispatch";
+    callActivityMethod("managedAdopt", "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V",
+        QJniObject::fromString(request).object<jstring>(), QJniObject::fromString(expected.id).object<jstring>(),
+        QJniObject::fromString(ticket).object<jstring>());
+}
 void AndroidController::onManagedLifecycle(JNIEnv*, jobject, jstring resultJson) {
     const QJsonDocument document = QJsonDocument::fromJson(QJniObject(resultJson).toString().toUtf8());
     if (!document.isObject()) { qInfo() << "MayakManagedStopAck accepted=false reason=shape"; return; }
@@ -861,6 +877,55 @@ void AndroidController::onManagedLifecycle(JNIEnv*, jobject, jstring resultJson)
             if (ticket != controller->m_managedTicket || context != controller->m_expectedHealth.id) return;
             controller->m_expectedHealth = {};
             emit controller->managedDenied(ticket, context);
+        } else if (type == "managedRecovered") {
+            const QString request = obj.value("recoverRequestId").toString();
+            const QString context = obj.value("healthContextId").toString();
+            if (!obj.value("recovered").isBool() || !controller->m_managedRecovers.contains(request) ||
+                controller->m_managedRecovers.value(request) != context) return;
+            controller->m_managedRecovers.remove(request);
+            emit controller->managedRecovered(request, context, obj.value("recovered").toBool());
+        } else if (type == "managedNetwork") {
+            const QString context = obj.value("healthContextId").toString();
+            const QString state = obj.value("state").toString();
+            if (context.isEmpty() || context != controller->m_expectedHealth.id) return;
+            if (state == "network_validated") emit controller->managedNetworkChanged(context, true);
+            else if (state == "network_lost") emit controller->managedNetworkChanged(context, false);
+        } else if (type == "managedAdopted") {
+            const QString request = obj.value("adoptRequestId").toString();
+            const QString context = obj.value("healthContextId").toString();
+            if (!obj.value("adopted").isBool() || !controller->m_managedAdopts.contains(request) ||
+                controller->m_managedAdopts.value(request).expected.id != context) return;
+            const auto pending = controller->m_managedAdopts.take(request);
+            const bool adopted = obj.value("adopted").toBool();
+            if (adopted) {
+                // From now on health/network/resume events of this context belong to the owner.
+                controller->m_expectedHealth = pending.expected;
+                controller->m_managedTicket = pending.ticket;
+                controller->isWaitingStatus = false;
+            }
+            qInfo() << "MayakNet event=adopt_result adopted=" << adopted;
+            emit controller->managedAdopted(request, context, adopted);
+        } else if (type == "managedUserStop") {
+            const QString context = obj.value("healthContextId").toString();
+            if (context.isEmpty() || context != controller->m_expectedHealth.id) return;
+            qInfo() << "MayakNet event=user_stop source=system_ui";
+            emit controller->managedUserStopped(context);
+        } else if (type == "managedFailover") {
+            // The service watchdog could not repair the current exit while the UI was hidden.
+            const QString context = obj.value("healthContextId").toString();
+            if (context.isEmpty() || context != controller->m_expectedHealth.id) return;
+            qInfo() << "MayakNet event=failover_request source=service";
+            emit controller->managedFailoverRequested(context);
+        } else if (type == "connectRequest") {
+            qInfo() << "MayakNet event=connect_request source=system_ui";
+            controller->m_connectRequestPending = true;
+            emit controller->connectRequested();
+        } else if (type == "managedResume") {
+            const QString context = obj.value("healthContextId").toString();
+            if (context.isEmpty() || context != controller->m_expectedHealth.id ||
+                !obj.value("backendReplaced").isBool() || !obj.value("networkAvailable").isBool()) return;
+            emit controller->managedResumed(context, obj.value("backendReplaced").toBool(),
+                                            obj.value("networkAvailable").toBool());
         }
     }, Qt::QueuedConnection);
 }

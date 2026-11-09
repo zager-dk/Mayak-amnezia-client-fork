@@ -70,9 +70,29 @@ struct World : QObject {
     B::Done heldStopDone;
     QString heldStopNonce;
     std::function<void(B::Result)> observeDown;
+    // Connected-state recovery fixture: a stuck transport answers no probe and no RX.
+    bool tunnelDown=false, recoverHeals=true, recoverOk=true;
+    int failNextProbes=0, recovers=0;
+    std::function<void(B::Ticket,bool)> observeNetwork;
+    std::function<void(B::Ticket,bool,bool)> observeResume;
+    std::function<void(B::Ticket)> observeUserStop;
+    // Cold-start adoption fixture.
+    QString inspectionIdentity; // non-empty: the active inspection reports this control identity
+    bool adoptOk=true; int adopts=0; QString adoptedTicket;
+    qint64 adoptHandshakeAgeMs=60000; // the adopted live session's last handshake (no replacement)
+    bool adoptDeadline=false;         // the service never confirms the transfer in time
+    std::function<void(bool)> observeVisibility;
+    std::function<void(B::Ticket)> observeFailover;
+    bool silentFirst=false, singleCandidate=false;
+    QString lastAcquireCandidate() const {
+        QString id;
+        for (const auto& p:requestPayloads) if (p.value("action").toString()=="acquire") id=p.value("candidate_id").toString();
+        return id;
+    }
     std::unique_ptr<MayakAutoConnectRuntime> runtime;
     Vpn::ConnectionState state=Vpn::ConnectionState::Disconnected;
-    World() {
+    explicit World(bool withRecover=false, bool withAdopt=true) {
+        MayakAutoConnectRuntime::resetFailoverMemoryForTests(); // process-wide failover memory
         ApiV2ServerConfig cfg;
         cfg.configVersion=serverConfigUtils::ConfigSource::AmneziaGateway;
         cfg.name="Mayak test"; cfg.defaultContainer=DockerContainer::Awg;
@@ -85,7 +105,10 @@ struct World : QObject {
         port.inspect=[this](QString nonce,qint64,B::Inspected done) {
             events<<"inspect";
             if (holdInspection) { inspectionNonce=nonce; heldInspection=done; return; }
-            if (activeInspection) { current={guid(),std::make_shared<B::StartGate>()}; current.gate->commit(); backendRunning=true; done({B::OwnState::Active,nonce,{},current}); return; }
+            if (activeInspection) {
+                current={inspectionIdentity.isEmpty() ? guid() : QStringLiteral("recovery:")+inspectionIdentity,std::make_shared<B::StartGate>()};
+                current.gate->commit(); backendRunning=true; done({B::OwnState::Active,nonce,inspectionIdentity,current}); return;
+            }
             done({backendRunning?B::OwnState::Unknown:B::OwnState::Off,nonce,{},{}});
         };
         port.preparePermissions=[this](QString requestId,B::PermissionDone done) {
@@ -102,7 +125,9 @@ struct World : QObject {
             ticket.gate->commit(); backendRunning=true;
             AwgHealthContext expected{guid(),QString(64,'a'),selectedHost+":49963"};
             done({ticket,deadFirst && starts==1?B::Outcome::Failed:B::Outcome::Started,expected});
-            health={expected.id,1,expected.peerPublicKey,expected.endpoint,"10.8.0.2","MayakFixture",quint64(QDateTime::currentMSecsSinceEpoch()),10,10,true};
+            // silentFirst: the first exit never answers a handshake (no valid health ever).
+            const bool silent=silentFirst && selectedHost=="81.29.149.103";
+            health={expected.id,1,expected.peerPublicKey,expected.endpoint,"10.8.0.2","MayakFixture",quint64(QDateTime::currentMSecsSinceEpoch()),10,10,!silent};
             QTimer::singleShot(10,this,[this,ticket] {if(observeHealth)observeHealth(ticket,health);});
         };
         port.cancel=[](B::Ticket t){t.gate->cancel();};
@@ -115,10 +140,46 @@ struct World : QObject {
         };
         port.probe=[this](B::Ticket ticket,MayakTunnelProbeRequest request,qint64,B::Probed done) {
             events<<"probe";
-            done(ticket,!badProof,{ticket.opaqueAttempt,request.nonce,"81.29.149.103",request.interfaceName,request.localAddress.toString(),true},{});
-            health.rxTotal+=500; health.txTotal+=500;
+            bool ok=!badProof && !tunnelDown;
+            if (ok && failNextProbes>0) { --failNextProbes; ok=false; }
+            done(ticket,ok,{ticket.opaqueAttempt,request.nonce,"81.29.149.103",request.interfaceName,request.localAddress.toString(),true},{});
+            if (!tunnelDown) health.rxTotal+=500; // a live tunnel still carries RX on a random probe miss
+            health.txTotal+=500;
             QTimer::singleShot(10,this,[this,ticket] {if(observeHealth)observeHealth(ticket,health);});
         };
+        port.observeResume=[this](QObject*,std::function<void(B::Ticket,bool,bool)> resumed){observeResume=resumed;};
+        port.observeUserStop=[this](QObject*,std::function<void(B::Ticket)> stopped){observeUserStop=stopped;};
+        port.observeVisibility=[this](QObject*,std::function<void(bool)> changed){observeVisibility=changed;};
+        port.observeFailover=[this](QObject*,std::function<void(B::Ticket)> requested){observeFailover=requested;};
+        if (withAdopt) port.adopt=[this](B::Ticket recovery,B::Ticket fresh,QString identity,QJsonObject,QString nonce,qint64,B::Done done) {
+            ++adopts; events<<"adopt"; adoptedTicket=fresh.opaqueAttempt;
+            B::Result r{fresh,adoptOk && recovery.same(current) ? B::Outcome::Started : B::Outcome::Failed}; r.requestId=nonce;
+            if (adoptDeadline) r.outcome=B::Outcome::Deadline;
+            if (r.outcome==B::Outcome::Started) {
+                // Handover without replacement: the same running backend and session continue
+                // under the attempt ticket; its last handshake predates the adoption.
+                AwgHealthContext expected{identity,QString(64,'a'),selectedHost+":49963"};
+                r.expected=expected; current=fresh;
+                health={expected.id,7,expected.peerPublicKey,expected.endpoint,"10.8.0.2","MayakFixture",
+                        quint64(QDateTime::currentMSecsSinceEpoch()-adoptHandshakeAgeMs),10,10,true};
+                QTimer::singleShot(10,this,[this,fresh] { if (observeHealth) observeHealth(fresh,health); });
+            }
+            done(r);
+        };
+        if (withRecover) {
+            port.observeNetwork=[this](QObject*,std::function<void(B::Ticket,bool)> changed){observeNetwork=changed;};
+            port.recover=[this](B::Ticket ticket,QString nonce,qint64,B::Done done) {
+                ++recovers; events<<"recover";
+                B::Result result{ticket,recoverOk?B::Outcome::Started:B::Outcome::Failed}; result.requestId=nonce;
+                if (recoverOk) {
+                    if (recoverHeals) tunnelDown=false;
+                    // New backend: new generation, counters restart, same proof context.
+                    health.generation+=1; health.rxTotal=0; health.txTotal=0;
+                    QTimer::singleShot(10,this,[this,ticket] {if(observeHealth)observeHealth(ticket,health);});
+                }
+                done(result);
+            };
+        }
         runtime=std::make_unique<MayakAutoConnectRuntime>(&settings,&servers,&app,&subscription,&connection,port,nullptr,
             [this](const QString& path,const QJsonObject& payload,int){return transport(path,payload);});
         connection.setMayakRuntime(runtime.get());
@@ -167,14 +228,26 @@ struct World : QObject {
                         {configKey::dns1,"1.1.1.1"},{configKey::dns2,"1.0.0.1"}};
         return "vpn://"+QString::fromUtf8(qCompress(QJsonDocument(cfg).toJson(QJsonDocument::Compact)).toBase64(QByteArray::Base64UrlEncoding|QByteArray::OmitTrailingEquals));
     }
+    int failConfigCount=0; // gateway unreachable (DNS/timeout) for the next N config fetches
     QFuture<GatewayPostResult> transport(QString path,QJsonObject payload) {
         requestPayloads.append(payload);
+        if(path.endsWith("config") && failConfigCount>0) {
+            --failConfigCount; events<<"config_fail";
+            auto promise=std::make_shared<QPromise<GatewayPostResult>>(); promise->start(); auto future=promise->future();
+            allTransportPromises.append(promise);
+            QTimer::singleShot(5,this,[promise]{ if (promise->future().isFinished()) return;
+                promise->addResult({ErrorCode::ApiConfigDownloadError,{},false}); promise->finish(); });
+            return future;
+        }
         QJsonObject response; int delay=0;bool trusted=true;
         if(path.endsWith("config")) {
             publicKey=payload.value("public_key").toString();events<<"config";
             QJsonArray candidates;
-            for(const auto& candidate:{first,second}) candidates.append(QJsonObject{{"id",candidate},{"host",candidate==first?"81.29.149.103":"81.29.149.104"},
+            for(const auto& candidate:{first,second}) {
+                if (singleCandidate && candidate==second) continue;
+                candidates.append(QJsonObject{{"id",candidate},{"host",candidate==first?"81.29.149.103":"81.29.149.104"},
                 {"port",49963},{"preferred",candidate==first},{"expected_egress_ips",QJsonArray{"81.29.149.103"}}});
+            }
             response={{"mayak_connection",QJsonObject{{"schema",1},{"revision",14},{"expires_at",QDateTime::currentDateTimeUtc().addSecs(60).toString(Qt::ISODateWithMs)},{"candidates",candidates}}}};
         } else {
             const auto action=payload.value("action").toString();events<<action;
@@ -226,6 +299,41 @@ struct World : QObject {
         QCoreApplication::processEvents();
     }
     int records() {auto result=mayak::attempts::MayakAttemptStore(&settings).load();return result.ok?result.records.size():-1;}
+    // A persisted attempt that started a backend and holds `allocation` (what a cold start finds).
+    QString seedStarted(const QString& candidateId=QString()) {
+        mayak::attempts::MayakAttemptStore store(&settings);
+        mayak::attempts::AttemptIdentity identity{id,guid(),guid(),guid(),candidateId.isEmpty()?first:candidateId};
+        mayak::attempts::AttemptInput input{identity,{"https://mayaklight.ru/gw/",guid(),QString::fromLatin1(QByteArray(32,'k').toBase64()),
+            "synthetic-device-credential","amnezia-premium","awg","ru",{}},false,false,{}};
+        if (!store.appendBeforeAcquire(input).ok || !store.attachAllocation(identity,allocation).ok || !store.markMayHaveStarted(identity).ok)
+            qFatal("Could not seed started attempt");
+        return identity.attemptId;
+    }
+};
+}
+namespace {
+// Leave nothing in flight for the next test (sessions may outlive a World's repositories).
+void settle(World& w) {
+    w.runtime->cancel();
+    QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+    QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+    QTest::qWait(100);
+}
+// Fast, test-local connected-monitor timing; restored for every other test.
+struct FastRecoveryTiming {
+    MayakAutoConnectRuntime::RecoveryTiming previous = MayakAutoConnectRuntime::recoveryTiming();
+    FastRecoveryTiming() {
+        MayakAutoConnectRuntime::RecoveryTiming t;
+        t.monitorMs=250; t.retryProbeMs=120; t.probeDeadlineMs=300; t.networkSettleMs=60; t.noNetworkUiMs=60;
+        t.stuckRxMs=200; t.stuckRxAfterNetworkMs=100; t.networkRecentMs=1500; t.recoverDeadlineMs=500;
+        t.recoverBackoffMs={0,250,500};
+        t.connectRetryMs={100,150,200};
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(t);
+    }
+    ~FastRecoveryTiming() { MayakAutoConnectRuntime::setRecoveryTimingForTests(previous); }
+    FastRecoveryTiming(const FastRecoveryTiming&) = delete;
+    FastRecoveryTiming& operator=(const FastRecoveryTiming&) = delete;
 };
 }
 class RuntimeTest : public QObject {
@@ -1042,6 +1150,559 @@ private slots:
             if(event=="start" || event=="probe" || event=="down" || event=="release") lifecycle<<event;
         QCOMPARE(lifecycle,QStringList({"start","probe","down","release","start","probe","down","release"}));
         QCOMPARE(w.records(),0);
+    }
+
+    // ---- Connected-state truth and Android soft recovery (5.1.0.17) ----
+    void stuckTransportShowsReconnectingAndSoftRecoversWithoutRestart() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int starts=w.starts, stops=w.stops, releases=w.releases, acquires=w.acquires;
+        QList<Vpn::ConnectionState> seen;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&seen](Vpn::ConnectionState s,QString){seen<<s;});
+        w.tunnelDown=true;
+        QTRY_VERIFY_WITH_TIMEOUT(w.recovers>=1,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,5000);
+        QVERIFY(seen.contains(Vpn::ConnectionState::Reconnecting));
+        QCOMPARE(w.runtime->message(),QStringLiteral("Подключено"));
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("connected"));
+        QCOMPARE(w.runtime->exitLocation().value("cityId").toString(),QStringLiteral("oslo"));
+        QCOMPARE(w.recovers,1);
+        // No re-admission, no native stop, no release: the same ticket keeps running.
+        QCOMPARE(w.starts,starts); QCOMPARE(w.stops,stops); QCOMPARE(w.releases,releases); QCOMPARE(w.acquires,acquires);
+        // The requested replacement (new generation) is not treated as an autonomous reset.
+        QTest::qWait(900);
+        QCOMPARE(w.state,Vpn::ConnectionState::Connected); QCOMPARE(w.stops,stops); QCOMPARE(w.recovers,1);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QCOMPARE(w.records(),0);
+    }
+
+    void osNoNetworkShowsWaitingAndNeverRecovers() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops;
+        QVERIFY(bool(w.observeNetwork));
+        w.tunnelDown=true; w.observeNetwork(w.current,false);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Reconnecting,3000);
+        QCOMPARE(w.runtime->message(),QStringLiteral("Нет сети — ждём…"));
+        QTest::qWait(1000);
+        QCOMPARE(w.recovers,0); QCOMPARE(w.state,Vpn::ConnectionState::Reconnecting);
+        w.tunnelDown=false; w.observeNetwork(w.current,true);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,3000);
+        QCOMPARE(w.recovers,0); QCOMPARE(w.stops,stops);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void networkChangeRecoversOnFirstFailedProbe() {
+        FastRecoveryTiming timing;
+        auto fast=MayakAutoConnectRuntime::recoveryTiming();
+        fast.stuckRxAfterNetworkMs=0; // isolate the rule: after a network change one failure suffices
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(fast);
+        World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops;
+        w.tunnelDown=true;
+        const int mark=w.events.size();
+        w.observeNetwork(w.current,true);
+        QTRY_VERIFY_WITH_TIMEOUT(w.recovers>=1,3000);
+        const QStringList after=w.events.mid(mark);
+        QCOMPARE(after.mid(0,after.indexOf("recover")).count("probe"),1);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,3000);
+        QCOMPARE(w.stops,stops);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void networkLossWithoutLaterEventStopsBlockingRecovery() {
+        FastRecoveryTiming timing;
+        auto fast=MayakAutoConnectRuntime::recoveryTiming();
+        fast.networkLostExpiryMs=500;
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(fast);
+        World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        w.tunnelDown=true; w.observeNetwork(w.current,false);
+        QTRY_COMPARE_WITH_TIMEOUT(w.runtime->message(),QStringLiteral("Нет сети — ждём…"),3000);
+        QCOMPARE(w.recovers,0);
+        // The same network came back silently: no validated event ever arrives.
+        QTRY_VERIFY_WITH_TIMEOUT(w.recovers>=1,4000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,3000);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void networkEventsRacingOwnRecoveryNeverResetTheLadder() {
+        FastRecoveryTiming timing; World w(true); w.recoverOk=false;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        w.tunnelDown=true;
+        QTRY_VERIFY_WITH_TIMEOUT(w.recovers>=1,5000);
+        // e.g. a re-established TUN reported as a "new network" right after each replacement
+        for (int i=0;i<12;++i) { w.observeNetwork(w.current,true); QTest::qWait(100); }
+        QVERIFY2(w.recovers<=3,qPrintable(QString::number(w.recovers)));
+        w.tunnelDown=false;
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,3000);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void singleRandomProbeMissNeverShowsReconnectingOrRecovers() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QList<Vpn::ConnectionState> seen;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&seen](Vpn::ConnectionState s,QString){seen<<s;});
+        w.failNextProbes=1;
+        QTRY_COMPARE_WITH_TIMEOUT(w.failNextProbes,0,3000);
+        QTest::qWait(1200);
+        QVERIFY(!seen.contains(Vpn::ConnectionState::Reconnecting));
+        QCOMPARE(w.recovers,0); QCOMPARE(w.state,Vpn::ConnectionState::Connected);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void failedSoftRecoveryIsBoundedByBackoff() {
+        FastRecoveryTiming timing; World w(true); w.recoverOk=false;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops;
+        w.tunnelDown=true;
+        QTRY_COMPARE_WITH_TIMEOUT(w.recovers,3,5000);
+        QTest::qWait(1200);
+        QCOMPARE(w.recovers,3); QCOMPARE(w.state,Vpn::ConnectionState::Reconnecting); QCOMPARE(w.stops,stops);
+        w.tunnelDown=false;
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,3000);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void withoutRecoverPortStatusIsHonestAndNothingRestarts() {
+        FastRecoveryTiming timing; World w(false); // Windows/desktop: no soft recovery port
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops, starts=w.starts;
+        w.tunnelDown=true;
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Reconnecting,3000);
+        QCOMPARE(w.runtime->message(),QStringLiteral("Переподключение…"));
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("verifying"));
+        QVERIFY(w.runtime->exitLocation().isEmpty());
+        w.tunnelDown=false;
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,3000);
+        QCOMPARE(w.recovers,0); QCOMPARE(w.stops,stops); QCOMPARE(w.starts,starts);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void unrequestedGenerationChangeKeepsExistingRestartPath() {
+        FastRecoveryTiming timing; World w(false);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops;
+        w.health.generation+=1; // autonomous backend replacement, never requested by the owner
+        w.observeHealth(w.current,w.health);
+        w.tunnelDown=true;
+        QTRY_VERIFY_WITH_TIMEOUT(w.stops>stops,5000);
+        w.runtime->cancel();
+        QTRY_VERIFY_WITH_TIMEOUT(w.state==Vpn::ConnectionState::Disconnected || w.state==Vpn::ConnectionState::Error,8000);
+    }
+
+    // ---- UI hidden/frozen: service watchdog owns recovery, Qt learns it on resume (r3) ----
+    void hiddenServiceReplacementIsAcceptedOnResume() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops, starts=w.starts, acquires=w.acquires, releases=w.releases;
+        QVERIFY(bool(w.observeResume));
+        // While hidden the service replaced the backend: new generation, same proof context.
+        w.observeResume(w.current,true,true);
+        QTest::qWait(30);
+        w.health.generation+=1; w.health.rxTotal=0; w.health.txTotal=0;
+        w.observeHealth(w.current,w.health);
+        QTest::qWait(900);
+        QCOMPARE(w.state,Vpn::ConnectionState::Connected); QCOMPARE(w.recovers,0);
+        QCOMPARE(w.stops,stops); QCOMPARE(w.starts,starts); QCOMPARE(w.acquires,acquires); QCOMPARE(w.releases,releases);
+        // The accepted change is not a latent reset: a later stuck transport soft-recovers
+        // instead of escalating to a full restart.
+        w.tunnelDown=true;
+        QTRY_VERIFY_WITH_TIMEOUT(w.recovers>=1,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,5000);
+        QCOMPARE(w.stops,stops); QCOMPARE(w.starts,starts);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QCOMPARE(w.records(),0);
+    }
+
+    void resumeWithoutReplacementStillGuardsGeneration() {
+        FastRecoveryTiming timing; World w(false);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops;
+        w.observeResume(w.current,false,true);
+        QTest::qWait(30);
+        w.health.generation+=1; // not announced: must stay an autonomous reset
+        w.observeHealth(w.current,w.health);
+        w.tunnelDown=true;
+        QTRY_VERIFY_WITH_TIMEOUT(w.stops>stops,5000);
+        w.runtime->cancel();
+        QTRY_VERIFY_WITH_TIMEOUT(w.state==Vpn::ConnectionState::Disconnected || w.state==Vpn::ConnectionState::Error,8000);
+    }
+
+    void resumeWithoutNetworkShowsWaitingAndNeverRecovers() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops;
+        w.tunnelDown=true;
+        w.observeResume(w.current,false,false);
+        QTRY_COMPARE_WITH_TIMEOUT(w.runtime->message(),QStringLiteral("Нет сети — ждём…"),3000);
+        QTest::qWait(600);
+        QCOMPARE(w.recovers,0); QCOMPARE(w.stops,stops);
+        w.tunnelDown=false; w.observeNetwork(w.current,true);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,3000);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    // ---- Connect-time network failure: retry instead of an immediate error (r5) ----
+    void connectNetworkFailureRetriesThenConnects() {
+        FastRecoveryTiming timing; World w; w.failConfigCount=2;
+        QList<Vpn::ConnectionState> seen; QStringList texts;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState s,QString t){seen<<s;texts<<t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.events.count("config_fail"),2);
+        QVERIFY(!seen.contains(Vpn::ConnectionState::Error));
+        QVERIFY(texts.contains(QStringLiteral("Нет связи с сервером Маяка — повторяем…")));
+        QCOMPARE(w.acquires,1); QCOMPARE(w.starts,1);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QCOMPARE(w.records(),0);
+    }
+
+    void connectNetworkFailureGivesUpAfterBoundedRetries() {
+        FastRecoveryTiming timing; World w; w.failConfigCount=100;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,10000);
+        QCOMPARE(w.events.count("config_fail"),4); // first try + 3 retries (connectRetryMs size)
+        QCOMPARE(w.acquires,0); QCOMPARE(w.starts,0); QCOMPARE(w.records(),0);
+        QTest::qWait(500);
+        QCOMPARE(w.events.count("config_fail"),4);
+        QVERIFY(!w.runtime->busy());
+    }
+
+    // ---- Cold-start adoption of the running backend (r6) ----
+    void adoptRunningTunnelOnColdStartWithoutStop() {
+        FastRecoveryTiming timing; World w(true);
+        const QString attempt=w.seedStarted();
+        w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running");
+        QStringList texts;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&texts](Vpn::ConnectionState,QString t){texts<<t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        // Never stopped, never reconciled, no new native start: the same attempt continues.
+        QVERIFY(!w.events.contains("down")); QVERIFY(!w.events.contains("reconcile"));
+        QCOMPARE(w.adopts,1); QCOMPARE(w.starts,0); QCOMPARE(w.acquires,1);
+        QCOMPARE(w.adoptedTicket,attempt);
+        bool sameAttempt=false;
+        for (const auto& p:w.requestPayloads) if (p.value("action").toString()=="acquire") sameAttempt=p.value("attempt_id").toString()==attempt;
+        QVERIFY(sameAttempt);
+        QVERIFY(texts.contains(QStringLiteral("Проверяем подключение…")));
+        QVERIFY(!texts.contains(QStringLiteral("Выбираем доступный сервер…")));
+        QCOMPARE(w.records(),1);
+        QCOMPARE(w.runtime->exitLocation().value("cityId").toString(),QStringLiteral("oslo"));
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QVERIFY(w.events.contains("down")); QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+    }
+
+    void adoptRefusedStopsWithRecoveryThenConnectsFresh() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running"); w.adoptOk=false;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.adopts,1);
+        const int adopt=w.events.indexOf("adopt"), down=w.events.indexOf("down");
+        QVERIFY(adopt>=0 && down>adopt);               // refused -> stopped with the recovery ticket
+        QVERIFY(w.events.indexOf("release",down)>down); // the adopted attempt's allocation is released
+        QCOMPARE(w.starts,1);                           // then a normal fresh start
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+    }
+
+    void adoptRejectedByServerStopsReconcilesAndContinues() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running"); w.fullFirst=true;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.adopts,0);
+        const int down=w.events.indexOf("down");
+        QVERIFY(down>0); QVERIFY(w.events.indexOf("reconcile",down)>down);
+        QCOMPARE(w.starts,1); QCOMPARE(w.acquires,2);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+    }
+
+    void adoptCandidateAbsentFallsBackToFreshConnect() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(guid()); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.adopts,0);
+        const int down=w.events.indexOf("down");
+        QVERIFY(down>w.events.indexOf("config")); QVERIFY(w.events.indexOf("reconcile",down)>down);
+        QCOMPARE(w.starts,1);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void withoutAdoptPortColdStartKeepsStopAndReconcile() {
+        FastRecoveryTiming timing; World w(true,false); // Windows: no adoption port
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.adopts,0);
+        const int down=w.events.indexOf("down");
+        QVERIFY(down>=0 && down<w.events.indexOf("reconcile") && w.events.indexOf("reconcile")<w.events.indexOf("config"));
+        QCOMPARE(w.starts,1);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+    }
+
+    void cancelDuringAdoptionStopsBackendAndReleases() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running"); w.acquireDelay=800;
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(w.acquires==1,5000);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(w.events.contains("down"),5000);
+        QTRY_VERIFY_WITH_TIMEOUT(w.events.contains("reconcile"),5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QCOMPARE(w.adopts,0); QCOMPARE(w.starts,0);
+        QTest::qWait(1200); // the delayed acquire reply arrives after cancel and must change nothing
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected); QCOMPARE(w.adopts,0); QCOMPARE(w.records(),0);
+    }
+
+    // ---- r8: independent review fixes ----
+    void adoptProvesLiveSessionWithoutReplacement() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running");
+        w.adoptHandshakeAgeMs=90000; // older than the attempt, inside the live-session window
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.adopts,1); QCOMPARE(w.starts,0); QVERIFY(!w.events.contains("down"));
+        settle(w);
+    }
+
+    void adoptRejectsStaleSessionHandshake() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running");
+        w.adoptHandshakeAgeMs=200000; // beyond WireGuard's 180 s: not a live session
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,15000);
+        QCOMPARE(w.adopts,1); QVERIFY(w.starts>=1);
+        QVERIFY(w.events.indexOf("down")>=0 && w.events.indexOf("down")<w.events.lastIndexOf("start"));
+        settle(w);
+    }
+
+    void adoptTransferUnconfirmedStopsWithRecoveryTicket() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running");
+        w.adoptDeadline=true; w.failStopOnce=true; // transfer not confirmed, first recovery stop unconfirmed
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,15000);
+        QCOMPARE(w.adopts,1);
+        // Until the adopted backend is confirmed down, every stop uses the authority that owns it.
+        QVERIFY(w.stopTickets.size()>=2);
+        QVERIFY(w.stopTickets.at(0).opaqueAttempt.startsWith(QStringLiteral("recovery:")));
+        QVERIFY(w.stopTickets.at(1).opaqueAttempt.startsWith(QStringLiteral("recovery:")));
+        settle(w);
+    }
+
+    void cancelDuringAdoptionReportsDisconnectedOnlyAfterStop() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running"); w.acquireDelay=800;
+        bool sawDisconnected=false;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&sawDisconnected](Vpn::ConnectionState s,QString) {
+            if (s==Vpn::ConnectionState::Disconnected) sawDisconnected=true;
+        });
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(w.acquires==1,5000);
+        w.holdNextStop=true; // the adopted backend's stop is still in flight when the user cancels
+        w.runtime->cancel();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.heldStopNonce.isEmpty(),5000);
+        QTest::qWait(300);
+        QVERIFY(!sawDisconnected); QVERIFY(w.runtime->busy());
+        w.backendRunning=false;
+        w.heldStopDone({w.stopTickets.last(),B::Outcome::ConfirmedDown,{},w.heldStopNonce});
+        QTRY_VERIFY_WITH_TIMEOUT(sawDisconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+    }
+
+    // ---- r9: failover to another exit when the current one stops working ----
+    void deadConnectedExitReconnectsToAnotherExitFirst() {
+        FastRecoveryTiming timing; World w(false);
+        QStringList texts;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&texts](Vpn::ConnectionState,QString t){texts<<t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.lastAcquireCandidate(),w.first);
+        const int stops=w.stops;
+        w.health.generation+=1; // own telemetry reset + failing probes: the exit is dead
+        w.observeHealth(w.current,w.health);
+        w.tunnelDown=true;
+        QTRY_VERIFY_WITH_TIMEOUT(w.stops>stops,8000);
+        w.tunnelDown=false; // the other exit works
+        QTRY_VERIFY_WITH_TIMEOUT(w.lastAcquireCandidate()==w.second,10000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.lastAcquireCandidate(),w.second);
+        QVERIFY(texts.contains(QStringLiteral("Сервер не отвечает — переподключаемся…")));
+        settle(w);
+    }
+
+    void serviceFailoverRequestWhileHiddenSwitchesExit() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.lastAcquireCandidate(),w.first);
+        QVERIFY(bool(w.observeFailover)); QVERIFY(bool(w.observeVisibility));
+        w.observeVisibility(false);
+        const int stops=w.stops, acquires=w.acquires;
+        w.observeFailover(w.current);
+        QTRY_VERIFY_WITH_TIMEOUT(w.stops>stops,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(w.acquires>acquires && w.state==Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.lastAcquireCandidate(),w.second);
+        settle(w);
+    }
+
+    void silentExitIsTriedLastOnNextConnect() {
+        FastRecoveryTiming timing; World w(true);
+        w.silentFirst=true; // e.g. Vienna unreachable from this network: no handshake answered
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,25000);
+        QCOMPARE(w.lastAcquireCandidate(),w.second);
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+        const int acquires=w.acquires;
+        w.runtime->begin(w.id); // a new connect (new session) remembers the silent exit
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.acquires,acquires+1);
+        QCOMPARE(w.lastAcquireCandidate(),w.second);
+        settle(w);
+    }
+
+    void hiddenFailoverWithSingleExitKeepsTunnel() {
+        FastRecoveryTiming timing; World w(true);
+        w.singleCandidate=true; // no other exit: taking the dead tunnel down would only leak
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        w.observeVisibility(false);
+        const int stops=w.stops, acquires=w.acquires;
+        w.observeFailover(w.current);
+        QTest::qWait(500);
+        QCOMPARE(w.stops,stops); QCOMPARE(w.acquires,acquires); QCOMPARE(w.state,Vpn::ConnectionState::Connected);
+        settle(w);
+    }
+
+    void failoverRequestForAnotherTicketIsIgnored() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int stops=w.stops;
+        w.observeFailover({guid(),std::make_shared<B::StartGate>()});
+        QTest::qWait(400);
+        QCOMPARE(w.stops,stops); QCOMPARE(w.state,Vpn::ConnectionState::Connected);
+        settle(w);
+    }
+
+    // ---- r9: reviewer notes 7 and 8 ----
+    void adoptionPermissionDeniedStillStopsAdoptedBackend() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running"); w.holdPermission=true;
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(bool(w.heldPermissionDone),5000);
+        auto done=w.heldPermissionDone; w.heldPermissionDone={};
+        done(w.permissionRequestId,B::PermissionResult::Denied);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,5000);
+        QVERIFY(w.events.contains("down")); QVERIFY(w.events.contains("reconcile"));
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+        QCOMPARE(w.adopts,0); QCOMPARE(w.starts,0);
+    }
+
+    void adoptionGiveUpWithUnconfirmedStopSaysSo() {
+        FastRecoveryTiming timing; World w(true);
+        w.seedStarted(guid()); w.activeInspection=true; w.inspectionIdentity=QStringLiteral("ctx-running"); w.missingStop=true;
+        QStringList texts;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&texts](Vpn::ConnectionState,QString t){texts<<t;});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,8000);
+        QCOMPARE(texts.last(),QStringLiteral("Не удалось завершить прежнее подключение. Нажмите «Включить Маяк» ещё раз."));
+        QVERIFY(!texts.contains(QStringLiteral("Нет связи с сервером Маяка — повторяем…")));
+        QCOMPARE(w.starts,0);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+        QTest::qWait(200);
+    }
+
+    void hiddenUiProbeFailuresNeverStopTunnel() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QVERIFY(bool(w.observeVisibility));
+        const int stops=w.stops, starts=w.starts;
+        w.observeVisibility(false);
+        w.tunnelDown=true; // e.g. a network switch while the UI is hidden: no health, probes fail
+        QTest::qWait(1500);
+        QCOMPARE(w.stops,stops); QCOMPARE(w.starts,starts); QCOMPARE(w.state,Vpn::ConnectionState::Connected);
+        w.tunnelDown=false; // the service watchdog repaired it meanwhile
+        w.observeVisibility(true);
+        QTest::qWait(700);
+        QCOMPARE(w.stops,stops); QCOMPARE(w.starts,starts); QCOMPARE(w.state,Vpn::ConnectionState::Connected);
+        settle(w);
+    }
+
+    // ---- Stop outside the app (notification/tile "Disconnect") is the user's stop (r7) ----
+    void systemUiDisconnectIsHonouredAsUserStop() {
+        FastRecoveryTiming timing; World w(true);
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int starts=w.starts, acquires=w.acquires;
+        QVERIFY(bool(w.observeUserStop));
+        w.tunnelDown=true; // the service already took the tunnel down
+        w.observeUserStop(w.current);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTest::qWait(1200);
+        // Never recovered, never reconnected, stays off.
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.recovers,0); QCOMPARE(w.starts,starts); QCOMPARE(w.acquires,acquires);
+        QVERIFY(!w.runtime->busy());
+    }
+
+    void cancelDuringConnectRetryWaitDisconnects() {
+        FastRecoveryTiming timing;
+        auto slow=MayakAutoConnectRuntime::recoveryTiming(); slow.connectRetryMs={5000};
+        MayakAutoConnectRuntime::setRecoveryTimingForTests(slow);
+        World w; w.failConfigCount=100;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.runtime->message(),QStringLiteral("Нет связи с сервером Маяка — повторяем…"),5000);
+        QVERIFY(w.runtime->busy());
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,3000);
+        QVERIFY(!w.runtime->busy());
+        const int fails=w.events.count("config_fail");
+        QTest::qWait(400);
+        QCOMPARE(w.events.count("config_fail"),fails);
+        QCOMPARE(w.acquires,0); QCOMPARE(w.records(),0);
     }
 };
 int main(int argc,char** argv) {

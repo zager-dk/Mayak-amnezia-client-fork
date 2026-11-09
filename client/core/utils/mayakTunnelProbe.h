@@ -7,6 +7,8 @@
 #include <QPointer>
 #include <QStringList>
 
+#include "core/utils/mayakSplitTunneling.h"
+
 struct MayakTunnelProbeRequest {
     QString attemptTag;
     QHostAddress localAddress;
@@ -14,6 +16,9 @@ struct MayakTunnelProbeRequest {
     QStringList expectedEgressIpv4;
     QString nonce;
     int deadlineMs = 8000;
+    // Split tunneling (sites): endpoints routed through the VPN. When set, the probe connects
+    // only to these IPv4 addresses; TLS still verifies the certificate for the host name.
+    QList<mayak::split::ProbeEndpoint> pinnedEndpoints;
 #ifdef MAYAK_TUNNEL_PROBE_TESTING
     QString testHost;
     quint16 testPort = 0;
@@ -46,6 +51,8 @@ public:
                                  const QStringList &expectedEgressIpv4,
                                  QString *observedEgressIpv4, QString *error);
     static bool parseHttpResponse(const QByteArray &wire, QByteArray *body, QString *error);
+    // HTTPS echo hosts the probe uses (resolved by the owner for split tunneling routes).
+    static QStringList echoHosts();
 
 signals:
     void finished(quint64 generation, bool success, const MayakTunnelProbeProof &proof,

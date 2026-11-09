@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Style 1.0
+import PageEnum 1.0
 import "../Controls2"
 import "../Controls2/TextTypes"
 import "../Components"
@@ -31,7 +32,33 @@ PageType {
     Behavior on cityCardReveal { NumberAnimation { duration: AmneziaStyle.mayakReduceMotion ? 0 : 300; easing.type: Easing.OutCubic } }
     readonly property real desiredBeaconDiameter: Math.min(470, width * 0.63, height * 0.42)
     readonly property real connectedActionTop: detailsTopY + 12
-    readonly property real connectedActionBottom: cityCard.y - 12
+    readonly property real connectedActionBottom: connectedRouting.y - 12
+    // «Россия напрямую» changed while connected: stop, then connect again (same path as the button).
+    property bool routingReconnect: false
+    function setRussiaDirect(enabled) {
+        if (MayakRouting.russiaDirect === enabled) return
+        MayakRouting.russiaDirect = enabled
+        if (ConnectionController.isConnected || ConnectionController.isConnectionInProgress) {
+            routingReconnect = true
+            routingReconnectGuard.restart()
+            ConnectionController.connectButtonClicked()
+        }
+    }
+    // Safety: never leave the reconnect pending (controls hidden, a later manual stop reconnecting).
+    Timer { id: routingReconnectGuard; interval: 30000; repeat: false; onTriggered: root.routingReconnect = false }
+    Connections {
+        target: ConnectionController
+        function onConnectionStateChanged() {
+            if (!root.routingReconnect) return
+            if (ConnectionController.cleanupPending) { root.routingReconnect = false; return }
+            // Read the controller directly: the button's derived phase may not be re-evaluated yet.
+            if (!ConnectionController.isConnected && !ConnectionController.isConnectionInProgress
+                    && ConnectionController.connectionPhase !== "stopping") {
+                root.routingReconnect = false
+                Qt.callLater(function() { if (!ConnectionController.isConnected && !ConnectionController.isConnectionInProgress) ConnectionController.connectButtonClicked() })
+            }
+        }
+    }
     readonly property real connectedActionHeight: Math.max(0, connectedActionBottom - connectedActionTop)
     property real beaconDiameter: cityVisible
                                   ? Math.min(desiredBeaconDiameter, Math.max(0, connectedActionHeight
@@ -120,6 +147,15 @@ PageType {
                 contentItem: Text { text: parent.text; color: root.cityVisible ? "#ECEFF6" : AmneziaStyle.color.mayakInk; font: parent.font; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }
             }
             Item { Layout.fillWidth: true }
+            // Заметный вход в настройки и аккаунт (вход по почте, устройства, Telegram); логотип слева ведёт туда же.
+            ToolButton {
+                objectName: "mayak-settings-button"; Layout.preferredWidth: 48; Layout.preferredHeight: 48
+                visible: !root.cityDetailsOpen
+                Accessible.name: qsTr("Настройки и аккаунт"); ToolTip.text: Accessible.name; ToolTip.visible: hovered
+                onClicked: PageController.goToPage(PageEnum.PageSettings)
+                background: Rectangle { radius: 14; color: root.cityVisible ? "#A60A0F1C" : parent.visualFocus ? AmneziaStyle.color.mayakSurface1 : "transparent"; border.width: parent.visualFocus ? 2 : 0; border.color: AmneziaStyle.color.mayakFocus }
+                contentItem: Image { objectName: "mayak-settings-svg-icon"; source: AmneziaStyle.mayakDay && !root.cityVisible ? "qrc:/ui/qml/MayakCity/icons/gear-day.svg" : "qrc:/ui/qml/MayakCity/icons/gear.svg"; sourceSize: Qt.size(24, 24); fillMode: Image.PreserveAspectFit; Accessible.ignored: true }
+            }
             ToolButton {
                 objectName: "mayak-theme-toggle"; Layout.preferredWidth: 48; Layout.preferredHeight: 48
                 Accessible.name: AmneziaStyle.mayakDay ? qsTr("Включить ночную тему") : qsTr("Включить дневную тему")
@@ -143,6 +179,63 @@ PageType {
             objectName: "mayak-home-helper"; Layout.fillWidth: true; Layout.minimumHeight: 40
             visible: !root.cityVisible && !root.cityDetailsOpen && !connectButton.showUnknownCityCard; text: qsTr("Выход выбирается автоматически")
             horizontalAlignment: Text.AlignHCenter; wrapMode: Text.WordWrap; color: AmneziaStyle.color.mayakInkMuted
+        }
+        // «Россия напрямую» and split tunneling: changed only while Mayak is off (applied on connect).
+        ColumnLayout {
+            id: routingControls; objectName: "mayak-routing-controls"
+            Layout.alignment: Qt.AlignHCenter
+            Layout.preferredWidth: Math.min(380, root.width - 36)
+            Layout.topMargin: 4
+            spacing: 8
+            visible: !root.cityVisible && !root.cityDetailsOpen && !root.routingReconnect && root.waitingPhase === ""
+                     && ["Idle", "Connected", "Failed", "Cancelled"].indexOf(connectButton.archivePhase) >= 0
+            Rectangle {
+                objectName: "mayak-russia-direct"
+                Layout.fillWidth: true; Layout.preferredHeight: Math.max(56, russiaRow.implicitHeight + 16); radius: 16
+                color: AmneziaStyle.color.mayakSurface1; border.width: 1; border.color: AmneziaStyle.color.mayakLine
+                RowLayout { id: russiaRow; anchors.fill: parent; anchors.leftMargin: 16; anchors.rightMargin: 12; spacing: 12
+                    ColumnLayout { Layout.fillWidth: true; spacing: 2
+                        Text { Layout.fillWidth: true; text: qsTr("Российские сайты напрямую"); color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 16; font.weight: Font.DemiBold; wrapMode: Text.WordWrap }
+                        Text { Layout.fillWidth: true; text: MayakRouting.russiaDirect ? qsTr("Остальные — через VPN") : qsTr("Весь трафик через VPN"); color: AmneziaStyle.color.mayakInkMuted; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 13; wrapMode: Text.WordWrap }
+                    }
+                    SwitchType {
+                        id: russiaSwitch; objectName: "mayak-russia-direct-switch"
+                        checked: MayakRouting.russiaDirect
+                        Accessible.name: qsTr("Российские сайты напрямую")
+                        onToggled: root.setRussiaDirect(checked)
+                    }
+                }
+            }
+            Rectangle {
+                objectName: "mayak-russia-direct-notice"
+                visible: MayakRouting.noticePending
+                Layout.fillWidth: true; Layout.preferredHeight: noticeColumn.implicitHeight + 20; radius: 16
+                color: AmneziaStyle.color.mayakSurface1; border.width: 1; border.color: AmneziaStyle.color.mayakLine
+                ColumnLayout { id: noticeColumn; anchors.left: parent.left; anchors.right: parent.right; anchors.top: parent.top; anchors.margins: 12; spacing: 6
+                    Text { Layout.fillWidth: true; text: qsTr("Российские сайты теперь открываются напрямую, остальные — через VPN. Выключить можно переключателем выше."); color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 14; wrapMode: Text.WordWrap }
+                    Button {
+                        id: noticeButton; objectName: "mayak-russia-direct-notice-ok"
+                        Layout.alignment: Qt.AlignRight; Layout.preferredHeight: 40
+                        text: qsTr("Понятно"); Accessible.name: text
+                        font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 15
+                        onClicked: MayakRouting.markNoticeShown()
+                        background: Rectangle { radius: 12; color: noticeButton.down ? AmneziaStyle.color.mayakSurface2 : "transparent"; border.width: noticeButton.visualFocus ? 2 : 0; border.color: AmneziaStyle.color.mayakFocus }
+                    }
+                }
+            }
+            Button {
+                id: splitButton; objectName: "mayak-split-tunneling"
+                Layout.fillWidth: true; Layout.preferredHeight: 48
+                text: qsTr("Раздельное туннелирование"); Accessible.name: text
+                font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 16
+                onClicked: splitDrawer.open()
+                background: Rectangle {
+                    radius: 14
+                    color: splitButton.down ? AmneziaStyle.color.mayakSurface2 : AmneziaStyle.color.mayakSurface1
+                    border.width: splitButton.visualFocus ? 2 : 1
+                    border.color: splitButton.visualFocus ? AmneziaStyle.color.mayakFocus : AmneziaStyle.color.mayakLine
+                }
+            }
         }
         BodyTextType {
             objectName: "mayak-connection-phase-status"; Layout.fillWidth: true; Layout.minimumHeight: 36
@@ -350,6 +443,46 @@ PageType {
                 onCanceled: beganAtTop = false
             }
     }
+    // Connected (city scene): the same two controls in one compact row above the city card.
+    RowLayout {
+        id: connectedRouting; objectName: "mayak-connected-routing"
+        width: cityCard.width; x: cityCard.x
+        height: 44
+        y: cityCard.y - 10 - height
+        spacing: 8
+        visible: root.cityVisible
+        opacity: root.cityCardReveal * Math.max(0, 1 - 2 * root.detailsProgress)
+        enabled: root.detailsProgress < 0.5 && !root.routingReconnect
+        Rectangle {
+            Layout.fillWidth: true; Layout.fillHeight: true; radius: 14
+            color: AmneziaStyle.color.mayakSurface1; border.width: 1; border.color: AmneziaStyle.color.mayakLine
+            RowLayout { anchors.fill: parent; anchors.leftMargin: 12; anchors.rightMargin: 6; spacing: 6
+                Text { Layout.fillWidth: true; text: qsTr("Россия напрямую"); elide: Text.ElideRight; color: AmneziaStyle.color.mayakInk; font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 14; font.weight: Font.DemiBold }
+                SwitchType {
+                    objectName: "mayak-connected-russia-switch"
+                    checked: MayakRouting.russiaDirect
+                    Accessible.name: qsTr("Российские сайты напрямую. Переключение переподключит Маяк")
+                    onToggled: root.setRussiaDirect(checked)
+                }
+            }
+        }
+        Button {
+            id: connectedSplitButton; objectName: "mayak-connected-split"
+            Layout.fillHeight: true; Layout.preferredWidth: Math.min(170, cityCard.width * 0.42)
+            text: qsTr("Туннелирование"); Accessible.name: qsTr("Раздельное туннелирование, просмотр")
+            font.family: AmneziaStyle.uiFontFamily; font.pixelSize: 14
+            onClicked: splitDrawer.open()
+            background: Rectangle {
+                radius: 14
+                color: connectedSplitButton.down ? AmneziaStyle.color.mayakSurface2 : AmneziaStyle.color.mayakSurface1
+                border.width: connectedSplitButton.visualFocus ? 2 : 1
+                border.color: connectedSplitButton.visualFocus ? AmneziaStyle.color.mayakFocus : AmneziaStyle.color.mayakLine
+            }
+        }
+    }
+
+    HomeSplitTunnelingDrawer { id: splitDrawer; parent: root }
+
     Keys.onEscapePressed: if (cityDetailsOpen) collapseDetails()
     Keys.onBackPressed: if (cityDetailsOpen) collapseDetails()
 }

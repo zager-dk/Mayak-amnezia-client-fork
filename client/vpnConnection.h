@@ -32,6 +32,11 @@ class VpnConnection : public QObject
     Q_OBJECT
 
 public:
+    // Fork split tunneling settings applied to a given config (Mayak managed start/adopt).
+    void appendSplitTunnelingConfig(QJsonObject &config) const;
+    // Mayak «Россия напрямую»: replaces the site split keys when the mode is on. Returns false
+    // when the mode is off (config untouched). excludeRoutes/routeBudget: platform strategy.
+    bool appendMayakRussiaDirectConfig(QJsonObject &config, bool excludeRoutes, int routeBudget) const;
     explicit VpnConnection(SecureServersRepository* serversRepository, SecureAppSettingsRepository* appSettingsRepository, QObject* parent = nullptr);
     ~VpnConnection() override;
 

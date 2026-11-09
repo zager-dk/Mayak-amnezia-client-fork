@@ -61,6 +61,27 @@ public:
         std::function<void(QObject*, std::function<void(Ticket, AwgTunnelHealth)>, Done)> observe;
         std::function<void(QString, PermissionDone)> preparePermissions;
         std::function<void(QString)> cancelPermissionPreparation;
+        // Optional (Android): replace the running backend's transport under the same
+        // ticket and proof context. Outcome Started = a new backend is running.
+        std::function<void(Ticket, QString, Millis, Done)> recover;
+        // Optional (Android): underlying network events for the current ticket.
+        std::function<void(QObject*, std::function<void(Ticket, bool)>)> observeNetwork;
+        // Optional (Android): UI became visible again. backendReplaced = the service watchdog
+        // replaced the backend (new generation, same proof context) while the UI was hidden.
+        std::function<void(QObject*, std::function<void(Ticket, bool, bool)>)> observeResume;
+        // Optional (Android): cold-start adoption of the running managed backend found by
+        // inspection. (recovery, fresh, controlIdentity, prepared config, nonce, deadline).
+        // Started = the service confirmed identity+ticket and soft-replaced the backend; the
+        // owner now holds `fresh`. Anything else leaves `recovery` as the only (stop) authority.
+        std::function<void(Ticket, Ticket, QString, QJsonObject, QString, Millis, Done)> adopt;
+        // Optional (Android): the current managed backend was stopped by the user outside the
+        // owner (notification/tile "Disconnect", VPN revoked).
+        std::function<void(QObject*, std::function<void(Ticket)>)> observeUserStop;
+        // Optional (Android): app UI visibility (Activity started/stopped). While hidden the
+        // service streams no health and its watchdog owns stuck-tunnel repair.
+        std::function<void(QObject*, std::function<void(bool)>)> observeVisibility;
+        // Optional (Android): the service watchdog could not repair the current backend's exit.
+        std::function<void(QObject*, std::function<void(Ticket)>)> observeFailover;
     };
     explicit MayakBackendBridge(Port port, QObject* parent = nullptr);
     ~MayakBackendBridge() override;
@@ -71,6 +92,10 @@ public:
     void stopAndConfirm(Ticket ticket, Millis deadline, Done done);
     void inspectOwnBackend(Millis deadline, Inspected done);
     void probe(Ticket ticket, MayakTunnelProbeRequest request, Millis deadline, Probed done);
+    bool canRecover() const;
+    void recover(Ticket ticket, Millis deadline, Done done);
+    bool canAdopt() const;
+    void adopt(Ticket recovery, Ticket fresh, QString controlIdentity, QJsonObject config, Millis deadline, Done done);
     void preparePermissions(QString requestId, PermissionDone done);
     void cancelPermissionPreparation(const QString &requestId);
 signals:
@@ -79,6 +104,11 @@ signals:
     void error(const MayakBackendBridge::Result& error);
     // Separate cleanup event may be late; operation callback never revives.
     void backendDown(const MayakBackendBridge::Result& result);
+    void networkChanged(const MayakBackendBridge::Ticket& ticket, bool available);
+    void resumed(const MayakBackendBridge::Ticket& ticket, bool backendReplaced, bool networkAvailable);
+    void userStopped(const MayakBackendBridge::Ticket& ticket);
+    void visibilityChanged(bool visible);
+    void failoverRequested(const MayakBackendBridge::Ticket& ticket);
 private:
     struct State;
     std::shared_ptr<State> m_state;

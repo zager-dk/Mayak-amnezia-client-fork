@@ -1,5 +1,3 @@
-# MayakVPN 5.1.0.16 source candidate
+# MayakVPN 5.1.0.17 source
 
-This BUILD_ONLY source candidate starts from the immutable published 5.1.0.15 GPL ZIP (SHA-256 2e465d5143edffa37857c88b690a207fa64f767d3260ce8db4eedad8f16a692c) and preserves its complete 86-file accepted product baseline. It overlays only files explicitly named by the frozen UI16 review manifest; that manifest, its independent review evidence, and the exact source hashes are recorded in SOURCE_PROVENANCE.txt. No mutable-tree discovery is used. Existing GPL/OFL terms, third-party notices, dependency sources, and photo-license notice are retained byte for byte. This is a local source candidate, not a binary.
-
-Use RELEASE_BUILD_NOTES_5.1.0.16.md with the existing externally managed toolchains.
+Complete corresponding source for MayakVPN 5.1.0.17 (Windows x64 and Android arm64). It starts from the published 5.1.0.16 GPL source archive (SHA-256 7cdd2bd41e0d3e5cd228c8893e4d541146867b443f0ba1ef0087e7681785739a) and overlays the changed and added source files listed in SOURCE_PROVENANCE.txt. GPL/OFL terms, third-party notices, dependency sources and the photo-license notice are retained. Build inputs: RELEASE_BUILD_NOTES_5.1.0.17.md.

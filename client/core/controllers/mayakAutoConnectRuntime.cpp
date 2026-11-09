@@ -8,6 +8,7 @@
 #include "core/repositories/secureServersRepository.h"
 #include "core/utils/api/gatewayPayloadBuilder.h"
 #include "core/utils/constants/apiKeys.h"
+#include <algorithm>
 #include <QCryptographicHash>
 #include <QCoreApplication>
 #include <QDebug>
@@ -29,6 +30,15 @@ using B = MayakBackendBridge;
 using amnezia::ErrorCode;
 namespace {
 QString randomId() { return B::randomRequestId(); }
+MayakAutoConnectRuntime::RecoveryTiming& recoveryTimingStorage() {
+    static MayakAutoConnectRuntime::RecoveryTiming timing;
+    return timing;
+}
+// Failover memory for the app process (every connect is a new Session): an exit that stopped
+// working, or never answered a handshake while connecting, is tried last for a while.
+struct AvoidedExit { QString candidateId; qint64 until = 0; int knownExits = 0; };
+AvoidedExit& avoidedExitStorage() { static AvoidedExit avoided; return avoided; }
+constexpr qint64 kAvoidExitMs = 10 * 60 * 1000;
 qint64 utcDeadline(qint64 mono) { return QDateTime::currentMSecsSinceEpoch() + qMax<qint64>(0, mono-B::monotonicMillis()); }
 QJsonObject payloadFor(const at::AttemptRecord& r) {
     return {{"auth_data", QJsonObject{{"api_key",r.deviceApiKey()}}}, {"installation_uuid",r.installationUuid()},
@@ -90,6 +100,21 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     bool preflightNativeOff = false;
     QString permissionRequestId;
     qint64 preflightDeadline = 0, lastMonitor = 0;
+    bool monitorProbing = false;
+    // Connect-time network failures are retried (RecoveryTiming::connectRetryMs) before an error.
+    int connectRetries = 0;
+    qint64 connectRetryAt = 0;
+    // Connected-state truth for the UI (rule: never "Connected" without a passing
+    // tunnel probe) and Android soft recovery of a stuck AWG transport.
+    struct Recovery {
+        int probeFailures = 0;
+        bool shown = false, shownNoNetwork = false;
+        bool networkLost = false;
+        qint64 networkLostAt = 0, networkChangedAt = 0, forceProbeAt = 0, outageStart = 0, nextAt = 0, lastRecoverAt = 0;
+        int attempts = 0;
+        bool inFlight = false;
+    } rec;
+    QVariantMap connectedLocation;
     struct Attempt {
         at::AttemptIdentity identity;
         ac::Candidate candidate;
@@ -102,9 +127,12 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         AwgTunnelHealth health;
         qint64 startMono = 0, startUtc = 0, healthAt = 0;
         bool started = false, stopped = false, cancelled = false, probing = false;
+        bool adopted = false; // continues the persisted attempt of an adopted running backend
         bool releasePending = false, releaseCallbackHandled = false, releaseLateHandled = false;
         quint64 releaseOperationId = 0;
         bool reset = false;
+        qint64 rxChangedAt = 0;          // last time own-peer RX advanced
+        qint64 replacementAllowedUntil = 0; // one requested backend replacement may change generation
         quint64 baselineRx = 0, baselineTx = 0;
         ProofDone proofDone;
         QString nonce;
@@ -112,16 +140,45 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         qint64 proofDeadline = 0;
         bool tlsOk = false;
         MayakTunnelProbeProof proof;
+        // Adopted attempt whose ownership transfer was never confirmed: the running backend is
+        // still owned by the recovery ticket, so every stop/cleanup of this attempt uses it.
+        B::Ticket stopTicket;
+        const B::Ticket& ownTicket() const { return stopTicket.valid() ? stopTicket : ticket; }
         bool acceptNativeDown(const B::Result& result) {
             // The Ticket is immutable for this attempt. Native OFF evidence is
             // monotonic across observer, original stop and cleanup retry ingress;
             // a different operation's Unknown/Deadline cannot revoke it.
-            if (result.outcome!=B::Outcome::ConfirmedDown || !ticket.same(result.ticket)) return false;
+            if (result.outcome!=B::Outcome::ConfirmedDown || !(ticket.same(result.ticket) ||
+                (stopTicket.valid() && stopTicket.same(result.ticket)))) return false;
             stopped=true;
             return true;
         }
     };
     std::map<std::pair<ac::CycleId,ac::AttemptId>, std::shared_ptr<Attempt>> attempts;
+    // Cold-start adoption (Android): the inspected running backend continues its persisted
+    // attempt instead of being stopped. While `pending`, only the recovery ticket owns it;
+    // every path either hands it to an Attempt (fresh ticket) or stops it with that ticket.
+    struct Adoption {
+        bool pending = false;
+        at::AttemptIdentity identity;
+        QString allocationId;
+        B::Ticket recovery;
+        QString controlIdentity;
+    } adoption;
+    // An adoption is being given up (backend stop + reconcile in flight): the session stays
+    // busy and a coordinator cancel must not publish "Disconnected" before it settles.
+    bool abandoning = false, abandonHeldDisconnect = false;
+    // Android UI hidden (Activity stopped): the service pauses streamed health and runs its own
+    // watchdog, so health age and probes say nothing here; connected monitoring pauses.
+    bool uiHidden = false;
+    // Note 7: giving up an adoption could not confirm the backend stop.
+    bool abandonUnconfirmed = false;
+    // Failover: the exit that just stopped working goes last in the next cycles for a while.
+    void avoidCandidate(const QString& id,const char* reason="connected_dead") {
+        if (id.isEmpty()) return;
+        avoidedExitStorage().candidateId=id; avoidedExitStorage().until=now()+kAvoidExitMs;
+        logNet(QStringLiteral("event=failover_avoid reason=%1").arg(QLatin1String(reason)));
+    }
 
     explicit Session(MayakAutoConnectRuntime* f, QString id)
         : facade(f), servers(f->m_servers), app(f->m_app), connection(f->m_connection),
@@ -146,6 +203,21 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 const auto loaded=store->load();
                 if (loaded.ok && loaded.records.isEmpty()) { reconnectWanted=false; terminal=false; coordinator->begin(); }
             }
+            // Scheduled connect retry after a network failure: same release barrier as above.
+            if (connectRetryAt && now()>=connectRetryAt && coordinator && !cancelled &&
+                coordinator->status().state == ac::State::Failed && !inFlight) {
+                const auto loaded=store->load();
+                if (loaded.ok && loaded.records.isEmpty()) {
+                    connectRetryAt=0; terminal=false;
+                    logNet(QStringLiteral("event=connect_retry_start retry=%1").arg(connectRetries));
+                    coordinator->begin();
+                } else if (now()>=connectRetryAt+10000) {
+                    // An unreleased attempt blocks a fresh cycle: never spin in "retrying" forever.
+                    connectRetryAt=0; terminal=true; phase=QStringLiteral("failed");
+                    logNet(QStringLiteral("event=connect_retry_blocked"));
+                    output(Vpn::ConnectionState::Error,errorText(ac::ErrorCategory::Network));
+                }
+            }
             for (auto& [tag,a]:attempts) {
                 if (a->proofDone) advanceProof(tag,a);
             }
@@ -154,8 +226,41 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         connect(bridge.get(),&B::health,this,[this](B::Ticket ticket,AwgTunnelHealth h) {
             for(auto& [tag,a]:attempts) {
                 if (!a->ticket.same(ticket) || !a->expected.matches(h) || !h.valid || a->cancelled) continue;
-                if (a->health.valid && (h.generation!=a->health.generation || h.rxTotal<a->health.rxTotal || h.txTotal<a->health.txTotal)) a->reset=true;
+                if (a->health.valid && h.generation!=a->health.generation && now()<a->replacementAllowedUntil) {
+                    // Exactly one owner-requested soft recovery: new backend, same proof context.
+                    a->replacementAllowedUntil=0; a->rxChangedAt=now();
+                    rec.forceProbeAt=now()+300; // the new interface identity is now known
+                } else if (a->health.valid && (h.generation!=a->health.generation || h.rxTotal<a->health.rxTotal || h.txTotal<a->health.txTotal)) a->reset=true;
+                else if (!a->health.valid || h.rxTotal>a->health.rxTotal) a->rxChangedAt=now();
                 a->health=h; a->healthAt=now();
+            }
+        });
+        connect(bridge.get(),&B::networkChanged,this,[this](B::Ticket ticket,bool available) { onNetwork(ticket,available); });
+        connect(bridge.get(),&B::resumed,this,[this](B::Ticket ticket,bool replaced,bool available) { onResume(ticket,replaced,available); });
+        connect(bridge.get(),&B::visibilityChanged,this,[this](bool visible) { onVisibility(visible); });
+        // The service watchdog could not repair the current exit while the UI was hidden:
+        // reconnect now, another exit first.
+        connect(bridge.get(),&B::failoverRequested,this,[this](B::Ticket ticket) {
+            auto a=connectedAttempt();
+            if (!a || !a->ticket.same(ticket) || a->cancelled || cancelled || !coordinator) return;
+            const auto s=coordinator->status();
+            if (s.state!=ac::State::Connected) return;
+            // N2: a hidden failover first takes the (dead) tunnel down. With no other exit known
+            // that only trades "no traffic" for "traffic outside the VPN": keep the tunnel.
+            if (avoidedExitStorage().knownExits<2) { logNet(QStringLiteral("event=failover_skip reason=single_exit")); return; }
+            logNet(QStringLiteral("event=failover_start source=service"));
+            reconnectWanted=true;
+            avoidCandidate(a->identity.candidateId);
+            coordinator->onOwnRepairExhausted(s.cycle);
+        });
+        // Stopped outside the app (notification/tile "Disconnect", VPN revoked): honour it as the
+        // user's own disconnect -- never as a fault to recover or reconnect.
+        connect(bridge.get(),&B::userStopped,this,[this](B::Ticket ticket) {
+            if (cancelled) return;
+            for (const auto& [tag,a]:attempts) {
+                if (!a->ticket.same(ticket) || a->cancelled) continue;
+                logNet(QStringLiteral("event=user_stop"));
+                stopUser(); return;
             }
         });
         connect(bridge.get(),&B::error,this,[this](const B::Result& r) {
@@ -163,7 +268,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             if (r.detail==QStringLiteral("permissionDenied")) { cancelled=true; coordinator->cancel(); }
         });
         connect(bridge.get(),&B::backendDown,this,[this](const B::Result& r) {
-            for(auto& [tag,a]:attempts) a->acceptNativeDown(r);
+            for(auto& [tag,a]:attempts) noteNativeDown(a,r);
         });
     }
     ac::Millis now() const override { return B::monotonicMillis(); }
@@ -180,8 +285,17 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             cfg->apiConfig.userCountryCode==common.value("user_country_code").toString();
     }
     void failure(QString text) { ++preflightGeneration; preparing=false; terminal=true; phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,std::move(text)); }
+    // Note 8: an early refusal after adoption began still stops the adopted backend first
+    // (recovery ticket + reconcile), exactly like every other adoption give-up.
+    void failureAfterAdoption(QString text) {
+        if (!adoption.pending) { failure(std::move(text)); return; }
+        preparing=false; terminal=false; // busy until the give-up settles
+        auto self=shared_from_this();
+        abandonAdoption([self,text](bool) { self->failure(text); });
+    }
     void beginCoordinatorAfterPreflight() {
         if (cancelled || !identityCurrent()) {
+            if (adoption.pending && !cancelled) { failureAfterAdoption(QStringLiteral("Сеанс Маяка изменился. Войдите снова и повторите попытку.")); return; }
             preparing=false; terminal=true;
             phase=cancelled ? QStringLiteral("cancelled") : QStringLiteral("idle");
             output(Vpn::ConnectionState::Disconnected,{}); return;
@@ -194,7 +308,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     }
     void preparePermissionsAndBeginCoordinator() {
         if (cancelled || terminal || !preparing || now()>=preflightDeadline || permissionPending || coordinator) return;
-        if (!identityCurrent()) { failure(QStringLiteral("Сеанс Маяка изменился. Войдите снова и повторите попытку.")); return; }
+        if (!identityCurrent()) { failureAfterAdoption(QStringLiteral("Сеанс Маяка изменился. Войдите снова и повторите попытку.")); return; }
         permissionPending=true;
         permissionRequestId=randomId();
         const QString requestId=permissionRequestId;
@@ -205,10 +319,10 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             self->permissionPending=false;
             self->permissionRequestId.clear();
             if (result==B::PermissionResult::Denied) {
-                self->failure(QStringLiteral("Разрешение VPN не выдано. Нажмите «Включить Маяк» и разрешите подключение.")); return;
+                self->failureAfterAdoption(QStringLiteral("Разрешение VPN не выдано. Нажмите «Включить Маяк» и разрешите подключение.")); return;
             }
             if (result!=B::PermissionResult::Ready) {
-                self->failure(QStringLiteral("Не удалось подготовить разрешение VPN. Повторите попытку.")); return;
+                self->failureAfterAdoption(QStringLiteral("Не удалось подготовить разрешение VPN. Повторите попытку.")); return;
             }
             self->beginCoordinatorAfterPreflight();
         });
@@ -232,6 +346,13 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         inspectPreflight();
         timer.start();
     }
+    // A confirmed OFF of an adopted backend through its recovery authority also discharges the
+    // cold-start "foreign backend" barrier: that backend was the only one inspection found.
+    bool noteNativeDown(const std::shared_ptr<Attempt>& a,const B::Result& r) {
+        const bool down=a->acceptNativeDown(r);
+        if (down && a->stopTicket.valid() && a->stopTicket.same(r.ticket)) preflightNativeOff=true;
+        return down;
+    }
     bool nativeDown() const {
         if (!preflightNativeOff) return false;
         for (const auto& [tag,a]:attempts) if (a->started && !a->stopped) return false;
@@ -245,6 +366,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     bool finishCleanup() {
         const auto loaded=store->load();
         if (!loaded.ok || !loaded.records.isEmpty() || !nativeDown()) return false;
+        abandonHeldDisconnect=false;
         cleanupPending=false; cleanupOperation=false; cancelled=true;
         preparing=false; terminal=true; reconnectWanted=false; timer.stop();
         phase=QStringLiteral("cancelled"); output(Vpn::ConnectionState::Disconnected,{});
@@ -265,6 +387,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                     }
                 } else if (!self->terminal) self->reconcileNext();
             } else if (i.state==B::OwnState::Active && i.recoveryTicket.valid()) {
+                if (!self->cancelled && !self->cleanupOperation && self->tryBeginAdoption(i)) return;
                 const auto ticket=i.recoveryTicket;
                 self->bridge->cancel(ticket);
                 self->bridge->stopAndConfirm(ticket,self->cleanupOperation ? qMin(self->now()+3000,self->cleanupDeadline) : self->now()+3000,[self,ticket](B::Result r) {
@@ -288,6 +411,73 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 self->failure(QStringLiteral("Служба VPN не отвечает. Перезапустите приложение; на Windows проверьте установку Маяка."));
 #endif
             }
+        });
+    }
+    // Cold start found our running backend. Adopt it when the ledger holds exactly the attempt
+    // that may own it (started, with an allocation, same device credential and gateway).
+    // Server-side truth is re-checked by the idempotent acquire; the tunnel by the normal proof.
+    bool tryBeginAdoption(const B::Inspection& i) {
+        if (!bridge->canAdopt() || i.ownControlIdentity.isEmpty() || terminal || !preparing || now()>=preflightDeadline) return false;
+        const auto loaded=store->load();
+        if (!loaded.ok || loaded.records.size()!=1) return false;
+        const auto& r=loaded.records.first();
+        if (!r.mayHaveStarted() || r.tombstoned() || r.allocationId().isEmpty() || r.identity().attemptId.isEmpty() ||
+            r.identity().localSubscriptionId!=serverId || r.deviceApiKey()!=authority.deviceApiKey ||
+            r.gatewayEndpoint()!=authority.gatewayEndpoint) return false;
+        adoption={true,r.identity(),r.allocationId(),i.recoveryTicket,i.ownControlIdentity};
+        logNet(QStringLiteral("event=adopt_candidate"));
+        output(Vpn::ConnectionState::Preparing,QStringLiteral("Проверяем подключение…"));
+        preparePermissionsAndBeginCoordinator();
+        return true;
+    }
+    // Give up adoption: stop the running backend with the recovery ticket, release every server
+    // allocation of the persisted attempt (reconcile) and drop its ledger record. then(true) only
+    // when all three are confirmed; otherwise the old cleanup/error paths remain responsible.
+    void abandonAdoption(std::function<void(bool)> callerThen) {
+        if (!adoption.pending) { if (callerThen) callerThen(true); return; }
+        adoption.pending=false;
+        const auto recovery=adoption.recovery; const auto identity=adoption.identity;
+        auto self=shared_from_this();
+        // Busy for the whole give-up (stop + reconcile); a cancel meanwhile is finished here.
+        abandoning=true; ++inFlight;
+        std::weak_ptr<Session> owner=self;
+        const std::function<void(bool)> then=[owner,callerThen](bool ok) {
+            auto self=owner.lock(); if (!self) return;
+            --self->inFlight; self->abandoning=false;
+            if (callerThen) callerThen(ok);
+            if (!self->abandonHeldDisconnect) return;
+            self->abandonHeldDisconnect=false;
+            if (!self->finishCleanup()) {
+                self->cleanupPending=true; self->terminal=true; self->phase=QStringLiteral("failed");
+                self->output(Vpn::ConnectionState::Error,self->cleanupText());
+            }
+        };
+        bridge->stopAndConfirm(recovery,now()+3000,[self,recovery,identity,then](B::Result r) {
+            if (r.outcome!=B::Outcome::ConfirmedDown || !recovery.same(r.ticket)) {
+                self->logNet(QStringLiteral("event=adopt_abandon_stop_unconfirmed"));
+                self->abandonUnconfirmed=true; if (then) then(false); return;
+            }
+            self->preflightNativeOff=true;
+            const auto loaded=self->store->load();
+            if (!loaded.ok) { if (then) then(false); return; }
+            const auto it=std::find_if(loaded.records.begin(),loaded.records.end(),[&](const at::AttemptRecord& x){ return x.identity()==identity; });
+            if (it==loaded.records.end()) { if (then) then(true); return; }
+            ad::Request req; req.action="reconcile"; req.attemptId=identity.attemptId; req.cycleToken=identity.cycleToken;
+            req.commonPayload=payloadFor(*it); req.deadlineUtcMs=utcDeadline(self->now()+2500);
+            ++self->inFlight;
+            auto settled=std::make_shared<bool>(false);
+            std::weak_ptr<Session> weak=self;
+            auto settle=[weak,settled,identity,then](bool ok) {
+                auto self=weak.lock(); if (!self || *settled) return;
+                *settled=true; --self->inFlight;
+                const bool removed=ok && self->store->removeAfterConfirmedCleanup(identity).ok;
+                self->logNet(QStringLiteral("event=adopt_abandoned released=%1").arg(removed ? 1 : 0));
+                if (then) then(removed);
+            };
+            QTimer::singleShot(2500,self.get(),[settle] { settle(false); });
+            ad::MayakAdmissionClient::postAsync(req,self->transport,[settle](ad::Response response) {
+                settle(response.success && response.authenticatedResponse);
+            });
         });
     }
     void reconcileNext() {
@@ -359,7 +549,10 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         }
         switch(s.state) {
         case ac::State::Fetching: case ac::State::Admitting:
-            terminal=false; output(Vpn::ConnectionState::Preparing,QStringLiteral("Выбираем доступный сервер…")); break;
+            terminal=false;
+            output(Vpn::ConnectionState::Preparing, adoption.pending ? QStringLiteral("Проверяем подключение…")
+                                                                     : QStringLiteral("Выбираем доступный сервер…"));
+            break;
         case ac::State::Starting: case ac::State::Verifying:
             output(Vpn::ConnectionState::Connecting,QStringLiteral("Проверяем VPN-соединение…")); break;
         case ac::State::Connected:
@@ -369,7 +562,12 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 if (selected && !selected->cancelled) {
                     location.insert(QStringLiteral("candidateId"), selected->identity.candidateId);
                     location.insert(QStringLiteral("cityId"), selected->exitLocationCityId);
+                    selected->rxChangedAt=now();
                 }
+                const bool networkLost=rec.networkLost;
+                rec={}; rec.networkLost=networkLost; rec.networkLostAt=networkLost ? now() : 0;
+                connectRetries=0; connectRetryAt=0; abandonUnconfirmed=false;
+                connectedLocation=location;
                 output(Vpn::ConnectionState::Connected,QStringLiteral("Подключено"),location);
             } break;
         case ac::State::Stopping:
@@ -379,23 +577,70 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             if (s.error==ac::ErrorCategory::StopUnconfirmed) {
                 cleanupPending=true;
                 output(Vpn::ConnectionState::Error,cleanupText());
+            } else if (abandonUnconfirmed && !cancelled) {
+                // Note 7: the adopted backend's stop was not confirmed. Not a network problem and
+                // no automatic retry: a new connect re-inspects and stops it first.
+                abandonUnconfirmed=false;
+                output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось завершить прежнее подключение. Нажмите «Включить Маяк» ещё раз."));
+            } else if ((s.error==ac::ErrorCategory::Network || s.error==ac::ErrorCategory::Deadline) && !cancelled &&
+                       !reconnectWanted && connectRetries<recoveryTimingStorage().connectRetryMs.size()) {
+                // The gateway was unreachable (DNS/timeout, e.g. a mobile network waking up):
+                // keep the session busy and start a fresh cycle after a pause, not an error.
+                const qint64 delay=recoveryTimingStorage().connectRetryMs.at(connectRetries++);
+                connectRetryAt=now()+delay; terminal=false;
+                phase=QStringLiteral("preparing");
+                output(Vpn::ConnectionState::Preparing,QStringLiteral("Нет связи с сервером Маяка — повторяем…"));
+                logNet(QStringLiteral("event=connect_retry_scheduled retry=%1 delay_ms=%2").arg(connectRetries).arg(delay));
+            } else if (reconnectWanted && !cancelled) {
+                // A dead connected exit is being replaced (another exit first): not an error.
+                terminal=false; phase=QStringLiteral("preparing");
+                output(Vpn::ConnectionState::Preparing,QStringLiteral("Сервер не отвечает — переподключаемся…"));
             } else output(Vpn::ConnectionState::Error,errorText(s.error));
             break;
         case ac::State::Cancelled: case ac::State::Idle:
-            terminal=true; output(Vpn::ConnectionState::Disconnected,{}); break;
+            terminal=true;
+            if (abandoning) {
+                // The adopted backend is still being stopped/released: report it when settled.
+                abandonHeldDisconnect=true; phase=QStringLiteral("stopping");
+                output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…"));
+            } else output(Vpn::ConnectionState::Disconnected,{});
+            break;
         }
     }
     void stopUser() {
+        const bool reconnectWaiting=reconnectWanted;
         cancelled=true; reconnectWanted=false; ++preflightGeneration;
         if (!permissionRequestId.isEmpty()) {
             bridge->cancelPermissionPreparation(permissionRequestId);
             permissionRequestId.clear(); permissionPending=false;
         }
         for(auto& [tag,a]:attempts) { a->cancelled=true; if(a->ticket.valid()) bridge->cancel(a->ticket); }
-        if(coordinator) coordinator->cancel();
-        else {
+        const bool retryWaiting=connectRetryAt!=0; connectRetryAt=0;
+        const bool adopting=adoption.pending;
+        if (adopting) {
+            // The adopted backend is not yet owned by any attempt: stop it with the recovery
+            // ticket and release its attempt, then finish like any cancelled cleanup.
+            auto self=shared_from_this();
+            abandonAdoption([self](bool ok) {
+                if (ok && self->finishCleanup()) return;
+                self->abandonHeldDisconnect=false;
+                self->cleanupPending=true; self->terminal=true;
+                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,self->cleanupText());
+            });
+        }
+        if(coordinator) {
+            coordinator->cancel();
+            // A Failed coordinator ignores cancel(); a pending connect retry or failover
+            // reconnect is ours to end.
+            if ((retryWaiting || reconnectWaiting) && coordinator->status().state==ac::State::Failed) {
+                terminal=true; phase=QStringLiteral("cancelled"); output(Vpn::ConnectionState::Disconnected,{});
+            }
+        } else {
             preparing=false; terminal=true;
-            if (!finishCleanup()) {
+            if (adopting) {
+                // The abandon callback above finishes (or reports) this cleanup.
+                phase=QStringLiteral("stopping"); output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…"));
+            } else if (!finishCleanup()) {
                 cleanupPending=true;
                 phase=QStringLiteral("failed");
                 output(Vpn::ConnectionState::Error,errorText(ac::ErrorCategory::StopUnconfirmed));
@@ -440,8 +685,8 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 const quint64 generation=++cleanupGeneration;
                 bridge->cancel(attempt->ticket);
                 auto self=shared_from_this();
-                bridge->stopAndConfirm(attempt->ticket,qMin(now()+3000,cleanupDeadline),[self,attempt,generation](B::Result result) {
-                    attempt->acceptNativeDown(result);
+                bridge->stopAndConfirm(attempt->ownTicket(),qMin(now()+3000,cleanupDeadline),[self,attempt,generation](B::Result result) {
+                    self->noteNativeDown(attempt,result);
                     if (generation!=self->cleanupGeneration) {
                         if (attempt->stopped && !self->cleanupOperation) self->retryCleanup(true);
                         return;
@@ -500,7 +745,24 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         QTimer::singleShot(qMax<qint64>(0,operationDeadline-now()),this,[finish] { finish({},true); });
         ad::MayakAdmissionClient::postAsync(request,transport,[finish](ad::Response response) { finish(response,false); });
     }
-    void fetchFresh(ac::CycleId c,ac::AttemptId a,ac::Millis deadline,FetchDone done) override { fetch(c,a,deadline,0,std::move(done)); }
+    void fetchFresh(ac::CycleId c,ac::AttemptId a,ac::Millis deadline,FetchDone done) override {
+        if (!adoption.pending) { fetch(c,a,deadline,0,std::move(done)); return; }
+        auto self=shared_from_this();
+        fetch(c,a,deadline,0,[self,done](ac::CycleId c,ac::AttemptId a,ac::FetchStatus status,ac::Snapshot s) mutable {
+            if (!self->adoption.pending) { done(c,a,status,std::move(s)); return; }
+            if (status==ac::FetchStatus::Success) {
+                const QString want=self->adoption.identity.candidateId;
+                const auto it=std::find_if(s.candidates.begin(),s.candidates.end(),[&](const ac::Candidate& x) {
+                    return QString::fromStdString(x.id).compare(want,Qt::CaseInsensitive)==0; });
+                // The coordinator preserves order: the adopted exit is admitted first.
+                if (it!=s.candidates.end()) { std::rotate(s.candidates.begin(),it,it+1); done(c,a,status,std::move(s)); return; }
+                self->logNet(QStringLiteral("event=adopt_abandon reason=candidate_absent"));
+            } else self->logNet(QStringLiteral("event=adopt_abandon reason=fetch_failed"));
+            self->abandonAdoption([done,c,a,status,s](bool ok) mutable {
+                done(c,a,ok?status:ac::FetchStatus::NetworkError,ok?std::move(s):ac::Snapshot{});
+            });
+        });
+    }
     void fetch(ac::CycleId c,ac::AttemptId a,ac::Millis deadline,int retry,FetchDone done) {
         auto self=shared_from_this();
         if(!identityCurrent() || now()>=deadline) { done(c,a,ac::FetchStatus::AuthRevoked,{}); return; }
@@ -528,12 +790,31 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 for(const auto& ip:v.expectedEgressIps) x.expectedEgressIps.push_back(ip.toStdString());
                 s.candidates.push_back(std::move(x));
             }
+            avoidedExitStorage().knownExits=int(s.candidates.size());
+            // Failover: an exit that just stopped working is tried last (server order otherwise).
+            if (!self->adoption.pending && s.candidates.size()>1 && self->now()<avoidedExitStorage().until) {
+                const QString avoid=avoidedExitStorage().candidateId;
+                std::stable_partition(s.candidates.begin(),s.candidates.end(),[&avoid](const ac::Candidate& x) {
+                    return QString::fromStdString(x.id).compare(avoid,Qt::CaseInsensitive)!=0; });
+            }
             done(c,a,ac::FetchStatus::Success,std::move(s));
         });
         watcher->setFuture(transport(QStringLiteral("%1v1/config"),ad::buildMayakConfigPayload(common),timeout));
     }
     void acquire(ac::CycleId c,ac::AttemptId n,const ac::Candidate& candidate,ac::Millis deadline,AdmissionDone done) override {
         auto self=shared_from_this();
+        if (adoption.pending) {
+            if (QString::fromStdString(candidate.id).compare(adoption.identity.candidateId,Qt::CaseInsensitive)==0) {
+                acquireAdopted(c,n,candidate,deadline,std::move(done)); return;
+            }
+            logNet(QStringLiteral("event=adopt_abandon reason=other_candidate"));
+            const auto chosen=candidate;
+            abandonAdoption([self,c,n,chosen,deadline,done](bool ok) mutable {
+                if (!ok) { done(c,n,{ac::AdmissionStatus::Malformed,{}}); return; }
+                self->acquire(c,n,chosen,deadline,std::move(done));
+            });
+            return;
+        }
         const auto loaded=store->load();
         // A lost earlier acquire may still own a slot. Never allocate over it.
         if(!identityCurrent() || !loaded.ok || !loaded.records.isEmpty()) { done(c,n,{ac::AdmissionStatus::Malformed,{}}); return; }
@@ -569,10 +850,102 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             done(c,n,{status,{}});
         });
     }
+    // Idempotent acquire of the adopted attempt: same attempt id and cycle token, so the server
+    // re-validates account/device/exit and must return the SAME allocation (no new slot).
+    void acquireAdopted(ac::CycleId c,ac::AttemptId n,const ac::Candidate& candidate,ac::Millis deadline,AdmissionDone done) {
+        auto self=shared_from_this();
+        if (!identityCurrent()) {
+            abandonAdoption([done,c,n](bool) { done(c,n,{ac::AdmissionStatus::Malformed,{}}); }); return;
+        }
+        auto a=std::make_shared<Attempt>(); a->candidate=candidate; a->identity=adoption.identity; a->adopted=true;
+        a->ticket={a->identity.attemptId,std::make_shared<B::StartGate>()};
+        attempts[{c,n}]=a;
+        ad::Request request; request.action="acquire"; request.attemptId=a->identity.attemptId; request.cycleToken=a->identity.cycleToken;
+        request.candidateId=a->identity.candidateId; request.commonPayload=common; request.deadlineUtcMs=utcDeadline(deadline);
+        request.resumeAllocation=true; // the allocation's original connect_before is long past
+        ++inFlight;
+        logNet(QStringLiteral("event=adopt_acquire"));
+        ad::MayakAdmissionClient::postAsync(request,transport,[self,a,c,n,done](ad::Response r) mutable {
+            --self->inFlight;
+            if (r.authenticatedResponse && r.acquireValid && r.success &&
+                r.acquire.allocationId==self->adoption.allocationId && self->adoption.pending) {
+                a->allocation=r.acquire.allocationId; a->encodedConfig=r.acquire.encodedConfig;
+                if (r.acquire.exitLocationCandidateId.compare(a->identity.candidateId, Qt::CaseInsensitive) == 0)
+                    a->exitLocationCityId = r.acquire.exitLocationCityId;
+                a->connectBefore=self->now()+qMax<qint64>(15000,QDateTime::currentDateTimeUtc().msecsTo(r.acquire.connectBefore));
+                done(c,n,{ac::AdmissionStatus::Admitted,{a->allocation.toStdString(),a->encodedConfig.toStdString()}}); return;
+            }
+            ac::AdmissionStatus status=ac::AdmissionStatus::NetworkError;
+            if (r.authenticatedResponse && r.isError) {
+                if (r.error.code=="FULL") status=ac::AdmissionStatus::Full;
+                else if (r.error.code=="NOT_READY") status=ac::AdmissionStatus::NotReady;
+                else if (r.error.code=="DISABLED") status=ac::AdmissionStatus::Disabled;
+                else if (r.error.code=="REVOKED") status=ac::AdmissionStatus::AuthRevoked;
+                else if (r.error.code=="ACCOUNT_EXPIRED") status=ac::AdmissionStatus::AccountExpired;
+            } else if (r.authenticatedResponse && r.success) status=ac::AdmissionStatus::NotReady; // a different allocation
+            self->logNet(QStringLiteral("event=adopt_abandon reason=acquire status=%1").arg(int(status)));
+            a->cancelled=true;
+            // Stop the backend and release the attempt (reconcile releases every allocation of it).
+            self->abandonAdoption([done,c,n,status](bool ok) { done(c,n,{ok?status:ac::AdmissionStatus::Malformed,{}}); });
+        });
+    }
     std::shared_ptr<Attempt> get(ac::CycleId c,ac::AttemptId a) {
         auto i=attempts.find({c,a}); return i==attempts.end()?nullptr:i->second;
     }
-    void start(ac::CycleId c,ac::AttemptId n,const ac::Allocation&,ac::Millis deadline,StartDone done) override {
+    void start(ac::CycleId c,ac::AttemptId n,const ac::Allocation& allocation,ac::Millis deadline,StartDone done) override {
+        if (auto adopted=get(c,n); adopted && adopted->adopted) { startAdopted(c,n,deadline,std::move(done)); return; }
+        startNew(c,n,allocation,deadline,std::move(done));
+    }
+    // Hand the running backend to the adopted attempt: the service confirms control identity +
+    // ticket and soft-replaces the backend (new socket, same TUN), so the normal proof below
+    // sees a handshake newer than startUtc. Refusal: stop it with the recovery ticket.
+    void startAdopted(ac::CycleId c,ac::AttemptId n,ac::Millis deadline,StartDone done) {
+        auto self=shared_from_this(); auto a=get(c,n);
+        // The allocation is already admitted to this attempt: the coordinator's normal release
+        // frees it and the ledger record. Here only the backend is stopped (recovery ticket).
+        const auto giveUp=[self,a,c,n,done](const QString& reason) {
+            self->logNet(QStringLiteral("event=adopt_abandon reason=%1").arg(reason));
+            const bool pending=self->adoption.pending; const auto recovery=self->adoption.recovery;
+            self->adoption.pending=false;
+            if (!pending || !a) { done(c,n,{ac::StartStatus::MalformedConfig}); return; }
+            self->bridge->stopAndConfirm(recovery,self->now()+3000,[self,a,c,n,done,recovery](B::Result s) {
+                if (s.outcome==B::Outcome::ConfirmedDown && recovery.same(s.ticket)) {
+                    self->preflightNativeOff=true; a->started=false; a->stopped=true;
+                } else {
+                    // Unconfirmed: the coordinator's stop must not claim it is down, and it must
+                    // retry with the authority that still owns the backend (the recovery ticket).
+                    a->started=true; a->stopTicket=recovery;
+                }
+                done(c,n,{ac::StartStatus::MalformedConfig});
+            });
+        };
+        if (!a || !adoption.pending || !identityCurrent() || a->cancelled || now()>=a->connectBefore) { giveUp(QStringLiteral("start_precondition")); return; }
+        const auto err=subscription->applyMayakAcquireConfig(serverId,keys,a->encodedConfig,QString::fromStdString(a->candidate.publicIpv4),a->candidate.port);
+        QJsonObject config; DockerContainer container;
+        if (err!=ErrorCode::NoError || !identityCurrent() || connection->prepareConnection(serverId,config,container)!=ErrorCode::NoError
+            || !ContainerUtils::isAwgContainer(container)) { giveUp(QStringLiteral("config")); return; }
+        const auto recovery=adoption.recovery; const auto controlIdentity=adoption.controlIdentity;
+        adoption.pending=false; // ownership transfer in flight: this callback owns every outcome
+        a->started=true; a->startMono=now(); a->startUtc=QDateTime::currentMSecsSinceEpoch();
+        logNet(QStringLiteral("event=adopt_request"));
+        bridge->adopt(recovery,a->ticket,controlIdentity,config,qMin<qint64>(deadline,a->connectBefore),[self,a,c,n,done,recovery](B::Result r) {
+            if (r.outcome==B::Outcome::Started) {
+                a->expected=r.expected; self->preflightNativeOff=true; // no foreign backend remains
+                self->logNet(QStringLiteral("event=adopt_ok"));
+                done(c,n,{ac::StartStatus::Started}); return;
+            }
+            self->logNet(QStringLiteral("event=adopt_refused outcome=%1").arg(int(r.outcome)));
+            self->bridge->stopAndConfirm(recovery,self->now()+3000,[self,a,c,n,done,recovery](B::Result s) {
+                if (s.outcome==B::Outcome::ConfirmedDown && recovery.same(s.ticket)) {
+                    // Down by the recovery authority: the coordinator's stop of this attempt is a no-op,
+                    // and its normal release frees the allocation and the ledger record.
+                    self->preflightNativeOff=true; a->started=false; a->stopped=true;
+                } else a->stopTicket=recovery; // the transfer never completed: recovery still owns it
+                done(c,n,{ac::StartStatus::NetworkError});
+            });
+        });
+    }
+    void startNew(ac::CycleId c,ac::AttemptId n,const ac::Allocation&,ac::Millis deadline,StartDone done) {
         auto self=shared_from_this(); auto a=get(c,n);
         if(!a || !identityCurrent() || a->cancelled || now()>=a->connectBefore) { done(c,n,{ac::StartStatus::MalformedConfig}); return; }
         const auto err=subscription->applyMayakAcquireConfig(serverId,keys,a->encodedConfig,QString::fromStdString(a->candidate.publicIpv4),a->candidate.port);
@@ -616,24 +989,37 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         // Backend timestamps may have one-second precision: reject any earlier
         // second, never convert an old handshake by stamping receipt time.
         const qint64 activationSecond=(a->startUtc/1000)*1000;
-        const qint64 handshakeMono=a->startMono+qMax<qint64>(0,handshake-a->startUtc);
-        const bool fresh=handshake>=activationSecond && handshake<=QDateTime::currentMSecsSinceEpoch()
-            && qAbs((QDateTime::currentMSecsSinceEpoch()-a->startUtc)-(now()-a->startMono))<1500;
+        const qint64 nowUtc=QDateTime::currentMSecsSinceEpoch();
+        const bool clockSane=qAbs((nowUtc-a->startUtc)-(now()-a->startMono))<1500;
+        // An adopted backend is not restarted (a new socket loses its first handshake and costs
+        // seconds). Its session predates this attempt, so freshness is the live-session bound
+        // instead: a handshake no older than WireGuard's reject-after-time (180 s), together with
+        // the nonce/egress TLS probe through this interface and RX growth after it.
+        const bool adoptedLive=a->adopted && handshake>0 && handshake<=nowUtc && nowUtc-handshake<=180000;
+        const qint64 handshakeMono=adoptedLive && handshake<a->startUtc ? a->startMono-(a->startUtc-handshake)
+                                                                          : a->startMono+qMax<qint64>(0,handshake-a->startUtc);
+        const bool fresh=clockSane && ((handshake>=activationSecond && handshake<=nowUtc) || adoptedLive);
         ac::ProofResult result; result.probeSucceeded=fresh;
         result.evidence={a->proof.certificateVerified,a->proof.nonce==a->nonce,a->nonce.toStdString(),
             a->proof.observedEgressIpv4.toStdString(),a->expected.peerPublicKey.toStdString(),handshakeMono,
             a->baselineRx,a->health.rxTotal,a->reset,fresh};
+        result.evidence.adoptedLiveSession=adoptedLive;
         auto done=std::move(a->proofDone); done(tag.first,tag.second,std::move(result));
     }
     void stopAndConfirm(ac::CycleId c,ac::AttemptId n,ac::Millis deadline,StopDone done) override {
         auto a=get(c,n); if(!a) { done(c,n,{false}); return; }
         if(!a->started) { a->stopped=true; done(c,n,{true}); return; }
+        // A started backend that never got a single handshake answered (not the user's cancel):
+        // this exit is unreachable from here; the next connects try it last.
+        // (a->cancelled is set by the coordinator's own retry stop; the user's cancel is `cancelled`.)
+        if (!a->adopted && !a->health.valid && !cancelled && now()-a->startMono>=5000)
+            avoidCandidate(a->identity.candidateId,"no_handshake");
         auto self=shared_from_this(); bridge->cancel(a->ticket);
-        bridge->stopAndConfirm(a->ticket,deadline,[self,a,c,n,done](B::Result r) {
+        bridge->stopAndConfirm(a->ownTicket(),deadline,[self,a,c,n,done](B::Result r) {
             // Preserve exact observer evidence, but report this bounded call's
             // own result to the coordinator. A timed-out call must still fail;
             // a later OFF retry can use the retained evidence for reconciliation.
-            const bool confirmed=a->acceptNativeDown(r);
+            const bool confirmed=self->noteNativeDown(a,r);
             done(c,n,{confirmed});
         });
     }
@@ -726,19 +1112,138 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     void cancelOwned(ac::CycleId c,ac::AttemptId n) override {
         auto a=get(c,n); if(!a) return; a->cancelled=true; a->proofDone={}; bridge->cancel(a->ticket);
     }
+    void logNet(const QString& text) const { qInfo().noquote() << QStringLiteral("MayakNet ") + text; }
+    std::shared_ptr<Attempt> connectedAttempt() {
+        if(!coordinator || cancelled || coordinator->status().state!=ac::State::Connected) return {};
+        const auto s=coordinator->status(); return get(s.cycle,s.attempt);
+    }
+    void showRecovering() {
+        if (rec.shown && rec.shownNoNetwork==rec.networkLost) return;
+        rec.shown=true; rec.shownNoNetwork=rec.networkLost;
+        // Beacon shows the verification animation; never the Connected city card.
+        phase=QStringLiteral("verifying");
+        output(Vpn::ConnectionState::Reconnecting, rec.networkLost ? QStringLiteral("Нет сети — ждём…")
+                                                                  : QStringLiteral("Переподключение…"));
+        logNet(QStringLiteral("event=ui_reconnecting no_network=%1").arg(rec.networkLost ? 1 : 0));
+    }
+    void onNetwork(const B::Ticket& ticket,bool available) {
+        auto a=connectedAttempt();
+        if (!a || !a->ticket.same(ticket) || a->cancelled) return;
+        const auto& t=recoveryTimingStorage();
+        if (!available) {
+            if (!rec.networkLost) { rec.networkLost=true; rec.networkLostAt=now(); logNet(QStringLiteral("event=network_lost")); }
+            return;
+        }
+        const bool wasLost=rec.networkLost;
+        rec.networkLost=false; rec.networkChangedAt=now();
+        // A genuinely new network earns a fresh recovery ladder, but an event caused by
+        // (or racing) our own backend replacement never does: no recovery loop.
+        if (!rec.lastRecoverAt || now()-rec.lastRecoverAt>=t.networkRecentMs) { rec.attempts=0; rec.nextAt=0; }
+        rec.forceProbeAt=now()+t.networkSettleMs;
+        if (wasLost && rec.shown) showRecovering(); // "no network" -> "reconnecting"
+        logNet(QStringLiteral("event=network_validated after_loss=%1").arg(wasLost ? 1 : 0));
+    }
+    // The UI was hidden (Android froze this process; health was paused by the service).
+    // Health age therefore says nothing about the tunnel, and a backend replaced meanwhile by
+    // the service watchdog (same proof context) is one authorized generation change, not a reset.
+    void onResume(const B::Ticket& ticket,bool replaced,bool available) {
+        auto a=connectedAttempt();
+        if (!a || !a->ticket.same(ticket) || a->cancelled) return;
+        a->healthAt=now();
+        if (replaced) { a->replacementAllowedUntil=now()+8000; a->rxChangedAt=now(); }
+        rec.forceProbeAt=now()+(replaced ? 1500 : 500); // verify the tunnel right away
+        logNet(QStringLiteral("event=ui_resume replaced=%1 no_network=%2").arg(replaced ? 1 : 0).arg(available ? 0 : 1));
+        if (!available) onNetwork(ticket,false);
+        else if (rec.networkLost) onNetwork(ticket,true);
+    }
+    void onVisibility(bool visible) {
+        if (uiHidden==!visible) return;
+        uiHidden=!visible;
+        logNet(QStringLiteral("event=ui_%1").arg(visible ? QStringLiteral("visible") : QStringLiteral("hidden")));
+        if (!visible) return;
+        // Back in front: health resumes now; give it one interval before judging its age.
+        if (auto a=connectedAttempt(); a && !a->cancelled) { a->healthAt=now(); lastMonitor=now(); }
+    }
+    void startRecover(const std::shared_ptr<Attempt>& a) {
+        const auto& t=recoveryTimingStorage();
+        rec.inFlight=true; rec.lastRecoverAt=now();
+        const int attempt=++rec.attempts;
+        a->replacementAllowedUntil=now()+t.recoverDeadlineMs+3000;
+        logNet(QStringLiteral("event=recover_request attempt=%1").arg(attempt));
+        const qint64 started=now();
+        auto self=shared_from_this();
+        bridge->recover(a->ticket,now()+t.recoverDeadlineMs,[self,a,attempt,started](B::Result r) {
+            const auto& t=recoveryTimingStorage();
+            self->rec.inFlight=false;
+            const bool ok=r.outcome==B::Outcome::Started;
+            if (!ok) a->replacementAllowedUntil=0;
+            self->logNet(QStringLiteral("event=%1 attempt=%2 elapsed_ms=%3")
+                .arg(ok ? QStringLiteral("recover_backend_ok") : QStringLiteral("recover_failed")).arg(attempt).arg(self->now()-started));
+            const auto& backoff=t.recoverBackoffMs;
+            self->rec.nextAt=self->now()+(attempt<backoff.size() ? backoff.at(attempt) : backoff.isEmpty() ? 0 : backoff.last());
+            // Verify promptly; a new-generation health sample may move this earlier.
+            if (ok && !self->rec.forceProbeAt) self->rec.forceProbeAt=self->now()+1500;
+        });
+    }
+    void onMonitorResult(const std::shared_ptr<Attempt>& a,bool ok) {
+        const auto& t=recoveryTimingStorage();
+        if (ok) {
+            if (rec.shown) {
+                logNet(QStringLiteral("event=recovered outage_ms=%1 recover_attempts=%2").arg(now()-rec.outageStart).arg(rec.attempts));
+                phase=QStringLiteral("connected");
+                output(Vpn::ConnectionState::Connected,QStringLiteral("Подключено"),connectedLocation);
+            }
+            rec={}; return;
+        }
+        if (++rec.probeFailures==1) rec.outageStart=now();
+        logNet(QStringLiteral("event=probe_failed consecutive=%1 no_network=%2").arg(rec.probeFailures).arg(rec.networkLost ? 1 : 0));
+        if (rec.probeFailures>=2) showRecovering();
+        const bool recentNetwork=rec.networkChangedAt && now()-rec.networkChangedAt<t.networkRecentMs;
+        const qint64 rxStale=now()-a->rxChangedAt;
+        // A single random failure is not enough unless the underlying network just changed.
+        const bool stuck=!rec.networkLost && (recentNetwork || rec.probeFailures>=2) &&
+            rxStale>=(recentNetwork ? t.stuckRxAfterNetworkMs : t.stuckRxMs);
+        if (stuck && bridge->canRecover() && !rec.inFlight && rec.attempts<t.recoverBackoffMs.size() && now()>=rec.nextAt) {
+            showRecovering();
+            startRecover(a);
+        }
+    }
     void monitor() {
-        if(!coordinator || cancelled || coordinator->status().state!=ac::State::Connected || now()-lastMonitor<10000) return;
-        const auto s=coordinator->status(); auto a=get(s.cycle,s.attempt); if(!a || !a->health.valid || a->probing && a->proofDone) return;
-        lastMonitor=now(); auto self=shared_from_this();
+        auto a=connectedAttempt();
+        if(!a || !a->health.valid || a->probing && a->proofDone) return;
+        // Hidden UI: no health arrives by design and the service watchdog owns stuck-tunnel
+        // repair. A probe failure here must never turn into a full stop of a working tunnel.
+        if (uiHidden) return;
+        const auto& t=recoveryTimingStorage();
+        // A loss without any later network event must not block recovery forever.
+        if (rec.networkLost && now()-rec.networkLostAt>=t.networkLostExpiryMs) {
+            rec.networkLost=false; logNet(QStringLiteral("event=network_lost_expired"));
+            if (rec.shown) showRecovering();
+        }
+        if (rec.networkLost && now()-rec.networkLostAt>=t.noNetworkUiMs) showRecovering();
+        if (monitorProbing || rec.inFlight) return;
+        const bool forced=rec.forceProbeAt && now()>=rec.forceProbeAt;
+        if (!forced && now()-lastMonitor<(rec.probeFailures>0 ? t.retryProbeMs : t.monitorMs)) return;
+        rec.forceProbeAt=0;
+        const auto s=coordinator->status();
+        monitorProbing=true; lastMonitor=now(); auto self=shared_from_this();
         const auto rx=a->health.rxTotal,tx=a->health.txTotal;
         MayakTunnelProbeRequest req; req.attemptTag=a->ticket.opaqueAttempt; req.localAddress=QHostAddress(a->health.localAddress.section('/',0,0));
-        req.interfaceName=a->health.interfaceName; req.expectedEgressIpv4=a->egress; req.nonce=randomId(); req.deadlineMs=5000;
-        bridge->probe(a->ticket,req,now()+5000,[self,a,s,rx,tx](B::Ticket,bool ok,MayakTunnelProbeProof,QString) {
-            if(!self->coordinator || self->cancelled || a->cancelled) return;
+        req.interfaceName=a->health.interfaceName; req.expectedEgressIpv4=a->egress; req.nonce=randomId(); req.deadlineMs=int(t.probeDeadlineMs);
+        bridge->probe(a->ticket,req,now()+t.probeDeadlineMs,[self,a,s,rx,tx](B::Ticket,bool ok,MayakTunnelProbeProof,QString) {
+            self->monitorProbing=false; self->lastMonitor=self->now();
+            if(!self->coordinator || self->cancelled || a->cancelled || self->uiHidden) return;
+            const auto current=self->coordinator->status();
+            if (current.state!=ac::State::Connected || current.cycle!=s.cycle || current.attempt!=s.attempt) return;
             // Idle RX or provider/API failure alone never tears down a tunnel.
             const bool degraded=a->reset || self->now()-a->healthAt>12000 ||
                 (a->health.txTotal>tx && a->health.rxTotal==rx && QDateTime::currentMSecsSinceEpoch()-qint64(a->health.latestHandshakeEpochMs)>180000);
-            if(!ok && degraded) self->reconnectWanted=true;
+            if(!ok && degraded) {
+                self->reconnectWanted=true;
+                // If this ends the cycle, the next one tries another exit first.
+                if (self->rec.probeFailures>=1) self->avoidCandidate(a->identity.candidateId);
+            }
+            self->onMonitorResult(a,ok);
             self->coordinator->onConnectedProbe(s.cycle,ok,degraded);
             if(ok) self->reconnectWanted=false;
         });
@@ -753,6 +1258,9 @@ MayakAutoConnectRuntime::MayakAutoConnectRuntime(SecureQSettings* settings,Secur
 MayakAutoConnectRuntime::~MayakAutoConnectRuntime() {
     if(m_session) { m_session->facade=nullptr; m_session->stopUser(); m_session->coordinator.reset(); }
 }
+MayakAutoConnectRuntime::RecoveryTiming MayakAutoConnectRuntime::recoveryTiming() { return recoveryTimingStorage(); }
+void MayakAutoConnectRuntime::setRecoveryTimingForTests(const RecoveryTiming& timing) { recoveryTimingStorage()=timing; }
+void MayakAutoConnectRuntime::resetFailoverMemoryForTests() { avoidedExitStorage()={}; }
 bool MayakAutoConnectRuntime::manages(const QString& id) const { return m_app && m_app->isMayakManagedServer(id); }
 bool MayakAutoConnectRuntime::busy() const { return m_session && (m_session->cleanupPending || !m_session->terminal || m_session->inFlight>0); }
 void MayakAutoConnectRuntime::publish(Vpn::ConnectionState state,const QString& text,const QString& phase,

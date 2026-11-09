@@ -25,6 +25,7 @@ private const val TAG = "ServiceNotification"
 private const val OLD_NOTIFICATION_CHANNEL_ID: String = "org.amnezia.vpn.notification"
 private const val NOTIFICATION_CHANNEL_ID: String = "org.amnezia.vpn.notifications"
 const val NOTIFICATION_ID = 1337
+private const val DISCONNECTED_NOTIFICATION_ID = 1338
 
 private const val GET_ACTIVITY_REQUEST_CODE = 0
 private const val CONNECT_REQUEST_CODE = 1
@@ -65,7 +66,8 @@ class ServiceNotification(private val context: Context) {
         Log.v(TAG, "Build notification: $serverName, $state")
 
         return notificationBuilder
-            .setSmallIcon(R.drawable.ic_amnezia_round)
+            // Mayak: the lamp shows the state (lit = connected, empty window = not connected).
+            .setSmallIcon(if (state == CONNECTED) R.drawable.ic_mayak_status_on else R.drawable.ic_amnezia_round)
             .setContentTitle((serverName ?: "AmneziaVPN") + (protocol?.let { " $it" } ?: ""))
             .setContentText(context.getString(state))
             .setSubText(speedString)
@@ -101,6 +103,40 @@ class ServiceNotification(private val context: Context) {
         }
     }
 
+    /**
+     * Mayak: after a disconnect the service stops and its foreground notification goes with it.
+     * Leave an ordinary, dismissible "Disconnected · Connect" notification in its place, so the
+     * shade keeps a one-tap connect until the user swipes it away. Cancelled on the next connect.
+     */
+    @SuppressLint("MissingPermission")
+    fun showDisconnected(serverName: String?, protocol: String?) {
+        if (!isNotificationEnabled()) return
+        val connect = getAction(DISCONNECTED) ?: return
+        val notification = NotificationCompat.Builder(context, NOTIFICATION_CHANNEL_ID)
+            .setShowWhen(false)
+            .setOngoing(false)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(true)
+            .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setSmallIcon(R.drawable.ic_amnezia_round)
+            .setContentTitle((serverName ?: "AmneziaVPN") + (protocol?.let { " $it" } ?: ""))
+            .setContentText(context.getString(DISCONNECTED))
+            .setContentIntent(
+                PendingIntent.getActivity(
+                    context,
+                    GET_ACTIVITY_REQUEST_CODE,
+                    Intent(context, AmneziaActivity::class.java),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                )
+            )
+            .addAction(connect)
+            .build()
+        notificationManager.notify(DISCONNECTED_NOTIFICATION_ID, notification)
+    }
+
+    fun cancelDisconnected() = notificationManager.cancel(DISCONNECTED_NOTIFICATION_ID)
+
     @SuppressLint("MissingPermission")
     fun updateSpeed(speed: TrafficData) {
         if (context.isNotificationPermissionGranted()) {
@@ -130,7 +166,20 @@ class ServiceNotification(private val context: Context) {
                 )
             }
 
-            DISCONNECTED -> {
+            DISCONNECTED -> if (MayakLaunch.isManagedConfigSaved(context)) {
+                // Mayak session: only the app's Qt owner can obtain admission. The invisible
+                // MayakConnectActivity hands "Connect" to a running app in the background, and
+                // opens the app (then sends it back) only when it is not running.
+                Action(
+                    0, context.getString(R.string.connect),
+                    PendingIntent.getActivity(
+                        context,
+                        CONNECT_REQUEST_CODE,
+                        MayakLaunch.connectIntent(context),
+                        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+                    )
+                )
+            } else {
                 Action(
                     0, context.getString(R.string.connect),
                     PendingIntent.getBroadcast(

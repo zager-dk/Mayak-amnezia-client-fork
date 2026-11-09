@@ -63,6 +63,7 @@ struct Response {
     bool acquireValid = false;
     bool responseValid = false;
     bool success = false;
+    bool resumeAllocation = false; // copied from Request
 };
 
 struct Request {
@@ -73,6 +74,9 @@ struct Request {
     QString allocationId;
     QJsonObject commonPayload; // auth_data, installation_uuid and public_key
     qint64 deadlineUtcMs = 0;
+    // Idempotent re-acquire of an existing allocation (cold-start adoption): the server returns
+    // that allocation's original connect_before, which may already be in the past.
+    bool resumeAllocation = false;
 };
 
 using Transport = std::function<QFuture<GatewayPostResult>(const QString &, const QJsonObject &, int)>;
@@ -81,7 +85,8 @@ using Completion = std::function<void(Response)>;
 
 bool parseConnectionCapability(const QByteArray &responseBody, const QDateTime &nowUtc, ConnectionCapability *out,
                                QString *failure = nullptr);
-bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, QString *failure = nullptr);
+bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, QString *failure = nullptr,
+                          bool allowPastConnectBefore = false);
 bool parseAdmissionError(const QByteArray &responseBody, bool trustedEncryptedResponse, AdmissionError *out);
 bool isValidAttemptId(const QString &attemptId);
 QJsonObject buildPayload(const Request &request, bool *valid = nullptr);

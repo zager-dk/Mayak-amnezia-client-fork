@@ -42,9 +42,15 @@ public:
     void cancelManaged(const QString& ticket);
     void managedStop(const QString& request, const QString& context, const QString& ticket);
     void managedInspect(const QString& request);
+    void managedRecover(const QString& request, const QString& context, const QString& ticket);
+    // Adopt the running managed backend (cold start). `expected` becomes the accepted health
+    // context and `ticket` the managed ticket only after the service confirms the match.
+    void managedAdopt(const QString& request, const AwgHealthContext& expected, const QString& ticket);
     void prepareManagedPermissions(const QString &requestId, ManagedPermissionDone done);
     void cancelManagedPermissionPreparation(const QString &requestId);
     AwgHealthContext expectedAwgHealthContext() const { return m_expectedHealth; }
+    // Consumes a pending tile/notification connect request (survives an early emit at startup).
+    bool takeConnectRequest() { const bool pending = m_connectRequestPending; m_connectRequestPending = false; return pending; }
     // Called on the owning Qt thread, including JNI deliveries queued from Java.
     void receiveAwgTunnelHealth(const AwgTunnelHealth& health);
     void resetLastServer(int serverIndex);
@@ -99,6 +105,20 @@ signals:
     void managedStopped(const QString& request, const QString& context, bool stopped);
     void managedInspected(const QString& request, const QString& state, const QString& identity);
     void managedDenied(const QString& ticket, const QString& context);
+    void managedRecovered(const QString& request, const QString& context, bool recovered);
+    void managedAdopted(const QString& request, const QString& context, bool adopted);
+    // The managed session was stopped outside the owner (notification/tile "Disconnect", revoke).
+    void managedUserStopped(const QString& context);
+    // The service watchdog gave up repairing the current exit (soft replacements did not help):
+    // the owner should reconnect, preferring another exit.
+    void managedFailoverRequested(const QString& context);
+    // Underlying network of the current managed backend: true = new validated default, false = lost.
+    void managedNetworkChanged(const QString& context, bool available);
+    // The Activity became visible again: was the backend replaced by the service watchdog
+    // while the UI was hidden, and is the underlying network available now.
+    void managedResumed(const QString& context, bool backendReplaced, bool networkAvailable);
+    // Quick-settings tile / notification asked to connect (the app was opened for it).
+    void connectRequested();
     void fileOpened(QString uri);
     void fileSaved(bool success, bool cancelled);
     void configImported(QString config);
@@ -112,11 +132,15 @@ signals:
 
 private:
     bool isWaitingStatus = true;
+    bool m_connectRequestPending = false;
     ConnectionState m_vpnState = ConnectionState::UNKNOWN;
     AwgHealthContext m_expectedHealth;
     QString m_managedTicket;
     QHash<QString, QString> m_managedStops;
     QSet<QString> m_managedInspections;
+    QHash<QString, QString> m_managedRecovers;
+    struct PendingAdopt { AwgHealthContext expected; QString ticket; };
+    QHash<QString, PendingAdopt> m_managedAdopts;
     QHash<QString, ManagedPermissionDone> m_permissionPreflightCallbacks;
 
     static jclass log;

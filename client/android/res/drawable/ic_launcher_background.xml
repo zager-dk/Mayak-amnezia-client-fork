@@ -1,2 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle"><solid android:color="#0A0F1C" /></shape>
+<!-- Маяк: небо адаптивной иконки (как на главном экране). gen_android_icons.py -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android" android:shape="rectangle">
+    <gradient android:angle="270" android:startColor="#12234D" android:endColor="#4569B8" />
+</shape>

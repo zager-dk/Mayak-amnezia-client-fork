@@ -60,6 +60,9 @@ struct OwnTunnelProof {
     std::uint64_t rxBytesAfter = 0;
     bool counterReset = false;
     bool peerHandshakeObserved = false;
+    // Adopted running session (cold-start adoption): its handshake may predate the attempt,
+    // bounded by the adapter to WireGuard's live-session window (180 s before `now`).
+    bool adoptedLiveSession = false;
 };
 struct ProofResult { bool probeSucceeded = false; OwnTunnelProof evidence; };
 struct StopResult { bool confirmedDisconnected = false; };
@@ -130,6 +133,9 @@ public:
     // Degradation policy: retry only after two failed probes AND observed own
     // telemetry degradation. API/control failures alone never disconnect.
     void onConnectedProbe(CycleId, bool probeSucceeded, bool ownTelemetryDegraded);
+    // The platform's own repair (service watchdog: degraded own-peer telemetry, soft backend
+    // replacements did not help) gave up: end this connected cycle like two degraded failures.
+    void onOwnRepairExhausted(CycleId);
     const Status& status() const noexcept { return status_; }
     Millis overallDeadline() const noexcept { return overallDeadline_; }
     static bool isValidPublicIpv4(const std::string&);

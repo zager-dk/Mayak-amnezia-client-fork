@@ -25,8 +25,8 @@ PageType {
     property bool pageEnabled
 
     Component.onCompleted: {
-        if (ConnectionController.isConnected) {
-            PageController.showNotificationMessage(qsTr("Cannot change split tunneling settings during active connection"))
+        if (ConnectionController.isConnected || ConnectionController.isConnectionInProgress) {
+            PageController.showNotificationMessage(qsTr("Только просмотр: изменять можно при выключенном Маяке"))
             root.pageEnabled = false
         } else if (ServersUiController.isDefaultServerDefaultContainerHasSplitTunneling) {
             PageController.showNotificationMessage(qsTr("Default server does not support split tunneling function"))
@@ -48,7 +48,12 @@ PageType {
         }
     }
 
-    readonly property var routeModes: [
+    // Mayak «Россия напрямую»: the two lists are exceptions to Russian routing, always in effect.
+    readonly property bool russiaDirect: typeof MayakRouting !== "undefined" && MayakRouting.russiaDirect
+    readonly property var routeModes: russiaDirect ? [
+        { type: 1, segmentName: qsTr("Через VPN"), name: qsTr("Эти сайты всегда открываются через VPN, даже российские") },
+        { type: 2, segmentName: qsTr("Напрямую"), name: qsTr("Эти сайты всегда открываются напрямую, даже зарубежные") }
+    ] : [
         { type: 1, segmentName: qsTr("Via VPN"), name: qsTr("Only the sites listed here will be accessed through the VPN") },
         { type: 2, segmentName: qsTr("Directly"), name: qsTr("Addresses from the list should not be accessed via VPN") }
     ]
@@ -100,7 +105,16 @@ PageType {
 
                 Layout.fillWidth: true
 
-                title: qsTr("Split tunneling")
+                title: root.russiaDirect ? qsTr("Исключения для сайтов") : qsTr("Split tunneling")
+            }
+
+            BodyTextType {
+                visible: root.russiaDirect
+                Layout.fillWidth: true
+                Layout.leftMargin: 16
+                Layout.rightMargin: 16
+                text: qsTr("Включён режим «Россия напрямую»: российские сайты открываются напрямую, остальные — через VPN. Здесь можно задать исключения.")
+                color: AmneziaStyle.color.textSecondary
             }
 
             ListItemType {
@@ -108,6 +122,7 @@ PageType {
                 Layout.leftMargin: 16
                 Layout.rightMargin: 16
 
+                visible: !root.russiaDirect
                 enabled: root.pageEnabled
 
                 text: qsTr("Split tunneling")

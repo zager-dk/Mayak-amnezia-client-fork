@@ -90,7 +90,7 @@ void bridge(QFuture<GatewayPostResult> source, Response response, Completion com
             QJsonObject obj;
             if (parseObject(result.body, &obj)) {
                 if (response.action == QStringLiteral("acquire") && obj.contains(QStringLiteral("allocation_id"))) {
-                    response.acquireValid = parseAcquireResponse(result.body, &response.acquire);
+                    response.acquireValid = parseAcquireResponse(result.body, &response.acquire, nullptr, response.resumeAllocation);
                     response.responseValid = response.acquireValid;
                     response.success = response.acquireValid;
                 } else {
@@ -182,7 +182,7 @@ bool parseConnectionCapability(const QByteArray &responseBody, const QDateTime &
     return true;
 }
 
-bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, QString *failure)
+bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, QString *failure, bool allowPastConnectBefore)
 {
     auto fail = [failure](const QString &reason) { if (failure) *failure = reason; return false; };
     QJsonObject obj;
@@ -195,7 +195,7 @@ bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, 
     out->connectBefore = QDateTime::fromString(date, Qt::ISODate).toUTC();
     const QJsonValue revision = obj.value(QStringLiteral("config_revision"));
     const QDateTime now = QDateTime::currentDateTimeUtc();
-    if (!out->connectBefore.isValid() || out->connectBefore <= now || out->connectBefore > now.addDays(1)
+    if (!out->connectBefore.isValid() || (!allowPastConnectBefore && out->connectBefore <= now) || out->connectBefore > now.addDays(1)
         || !revision.isDouble() || revision.toDouble() < 1 || revision.toDouble() > 9007199254740991.0
         || std::floor(revision.toDouble()) != revision.toDouble()) return fail(QStringLiteral("invalid revision or deadline"));
     if (!boundedString(obj.value(QStringLiteral("config")), 32768, &out->encodedConfig)) return fail(QStringLiteral("invalid config"));
@@ -299,6 +299,7 @@ void MayakAdmissionClient::postAsync(const Request &request, const Transport &tr
     bool valid = false;
     const QJsonObject payload = buildPayload(request, &valid);
     Response response; response.action = request.action; response.cycleToken = request.cycleToken; response.attemptId = request.attemptId;
+    response.resumeAllocation = request.resumeAllocation;
     const qint64 remaining = request.deadlineUtcMs - QDateTime::currentMSecsSinceEpoch();
     if (!valid || !transport) {
         response.transportError = amnezia::ErrorCode::ApiConfigEmptyError;
@@ -321,6 +322,7 @@ void MayakAdmissionClient::postAsync(const Request &request, const GatewayFactor
     bool valid = false;
     const QJsonObject payload = buildPayload(request, &valid);
     Response response; response.action = request.action; response.cycleToken = request.cycleToken; response.attemptId = request.attemptId;
+    response.resumeAllocation = request.resumeAllocation;
     const int timeoutMsecs = boundedTimeoutMsecs(request.deadlineUtcMs, maximumTimeoutMsecs);
     if (!valid || !gatewayFactory) {
         response.transportError = amnezia::ErrorCode::ApiConfigEmptyError;

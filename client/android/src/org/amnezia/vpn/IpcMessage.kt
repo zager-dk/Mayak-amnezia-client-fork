@@ -37,7 +37,15 @@ enum class Action : IpcMessage {
     NOTIFICATION_PERMISSION_GRANTED,
     SET_SAVE_LOGS,
     MANAGED_STOP,
-    MANAGED_INSPECT
+    MANAGED_INSPECT,
+    MANAGED_RECOVER,
+    // Mayak: the Activity's visibility. A stopped Activity is frozen by Android, so the
+    // service must not stream health into it and owns stuck-tunnel recovery meanwhile.
+    UI_BACKGROUND,
+    UI_FOREGROUND,
+    // Mayak: a cold-started Qt owner adopts the running managed backend (proves the exact
+    // control identity + ticket), followed by the same soft backend replacement.
+    MANAGED_ADOPT
 }
 
 fun <T> T.packToMessage(): Message
