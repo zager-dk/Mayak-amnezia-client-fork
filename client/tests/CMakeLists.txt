@@ -108,6 +108,15 @@ target_include_directories(test_common PUBLIC
 )
 
 if(NOT ANDROID)
+    add_executable(test_mayak_tunnel_interface_resolver
+        testMayakTunnelInterfaceResolver.cpp
+    )
+    target_link_libraries(test_mayak_tunnel_interface_resolver PRIVATE
+        Qt6::Test
+        test_common
+    )
+    add_test(NAME MayakTunnelInterfaceResolverTest COMMAND test_mayak_tunnel_interface_resolver)
+
     add_executable(test_multiple_imports
         testMultipleImports.cpp
     )

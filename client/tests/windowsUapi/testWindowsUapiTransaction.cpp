@@ -215,6 +215,54 @@ private slots:
     QVERIFY(service.stop()); QVERIFY(!service.interfaceExists());
     QVERIFY(service.stop()); QCOMPARE(testapi::state.creates, 1);
   }
+  void repeatedNativeStartStopCycles() {
+    WindowsTunnelService service;
+    for (int i = 0; i < 3; ++i) {
+      QVERIFY(service.start("synthetic"));
+      QVERIFY(service.isRunning());
+      QVERIFY(service.stop());
+      QVERIFY(!service.interfaceExists());
+    }
+    QCOMPARE(testapi::state.creates, 3);
+    QCOMPARE(testapi::state.deletes, 3);
+    QCOMPARE(testapi::state.sleeps, 0);
+  }
+  void terminalNativeStartFailureRetainsOwnerAndRetries_data() {
+    QTest::addColumn<DWORD>("specificCode");
+    QTest::newRow("create-device") << DWORD(3);
+    QTest::newRow("configure-device") << DWORD(7);
+  }
+  void terminalNativeStartFailureRetainsOwnerAndRetries() {
+    QFETCH(DWORD, specificCode);
+    WindowsTunnelService service;
+    testapi::state.terminalStart = true;
+    testapi::state.serviceExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+    testapi::state.serviceSpecificExitCode = specificCode;
+    testapi::state.deleteOk = false;
+
+    QVERIFY(!service.start("synthetic"));
+    QCOMPARE(testapi::state.sleeps, 0);
+    QCOMPARE(testapi::state.closedServices, 0); // Failed rollback retains owner.
+    QVERIFY(service.interfaceExists());
+    SERVICE_STATUS status{};
+    status.dwWin32ExitCode = ERROR_SERVICE_SPECIFIC_ERROR;
+    status.dwServiceSpecificExitCode = specificCode;
+    const QString reason = WindowsTunnelService::exitCodeToFailure(&status);
+    if (specificCode == 3)
+      QCOMPARE(reason, QString("Error while creating a WinTun device."));
+    else
+      QCOMPARE(reason, QString("Error while setting the device configuration."));
+
+    QVERIFY(!service.stop());
+    QCOMPARE(testapi::state.closedServices, 0);
+    testapi::state.deleteOk = true;
+    QVERIFY(service.stop());
+    QVERIFY(!service.interfaceExists());
+    testapi::state.terminalStart = false;
+    QVERIFY(service.start("synthetic"));
+    QVERIFY(service.stop());
+    QCOMPARE(testapi::state.sleeps, 0);
+  }
   void nativeStopFailure() {
     WindowsTunnelService service; QVERIFY(service.start("synthetic"));
     testapi::state.stopOk = false;

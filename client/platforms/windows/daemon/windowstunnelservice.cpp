@@ -310,6 +310,14 @@ static bool waitForServiceStatus(SC_HANDLE service, DWORD expectedStatus) {
       return true;
     }
 
+    // A service that has already stopped cannot reach RUNNING. Return to
+    // start() immediately so it can report the native service exit code and
+    // run its existing owned-handle cleanup instead of blocking the IPC loop.
+    if (expectedStatus == SERVICE_RUNNING &&
+        status.dwCurrentState == SERVICE_STOPPED) {
+      return false;
+    }
+
     logger.warning() << "The service is not in the right status yet.";
 
     Sleep(1000);

@@ -1,4 +1,5 @@
 #include "mayakTunnelProbe.h"
+#include "mayakTunnelInterfaceResolver.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -278,10 +279,25 @@ bool MayakTunnelProbe::parseHttpResponse(const QByteArray &wire, QByteArray *bod
 class ProbeRun final : public QObject {
 public:
     ProbeRun(MayakTunnelProbe *owner, quint64 generation, MayakTunnelProbeRequest request)
-        : QObject(owner), m_owner(owner), m_generation(generation), m_request(std::move(request)), m_deadline(new QTimer(this)) {
+        : QObject(owner), m_owner(owner), m_generation(generation), m_request(std::move(request)),
+          m_deadline(new QTimer(this)), m_bindRetry(new QTimer(this)) {
         m_elapsed.start();
         m_deadline->setSingleShot(true);
         connect(m_deadline, &QTimer::timeout, this, [this] { finish(false, {}, "probe deadline exceeded"); });
+        m_bindRetry->setSingleShot(true);
+        connect(m_bindRetry, &QTimer::timeout, this, [this] {
+            if (m_finished || !m_sourceBindWaiting) return;
+            m_sourceBindWaiting = false;
+            if (m_elapsed.elapsed() >= m_request.deadlineMs) {
+                finish(false, {}, "probe deadline exceeded");
+                return;
+            }
+            if (!interfaceIdentityMatches()) {
+                finish(false, {}, "AWG interface identity changed during source bind wait");
+                return;
+            }
+            openNextEndpoint(true);
+        });
     }
 
     void start() {
@@ -294,6 +310,7 @@ public:
         } else {
             finish(false, {}, "invalid probe request"); return;
         }
+        m_elapsed.restart();
         logStage(QStringLiteral("start"));
         m_deadline->start(m_request.deadlineMs);
         openNextEndpoint();
@@ -307,6 +324,8 @@ private:
                      .arg(m_parseOk).arg(m_nonceOk).arg(m_egressOk));
         m_finished = true;
         m_deadline->stop();
+        m_bindRetry->stop();
+        m_sourceBindWaiting = false;
         if (m_socket) m_socket->abort();
         QPointer<ProbeRun> alive(this);
         if (m_owner) emit m_owner->finished(m_generation, ok, proof, error);
@@ -343,7 +362,7 @@ private:
         QTimer::singleShot(0, this, [this, attempt, reason] { failAttempt(attempt, reason); });
     }
 
-    void openNextEndpoint() {
+    void openNextEndpoint(bool retrySourceBind = false) {
         if (m_finished) return;
         ++m_attempt; // Invalidate events from the socket being abandoned before aborting it.
         const int attempt = m_attempt;
@@ -354,8 +373,9 @@ private:
             old->abort();
             old->deleteLater();
         }
-        if (hostCount() <= m_hostIndex) { finish(false, {}, "all HTTPS echo endpoints failed"); return; }
-        const QString host = hostAt(m_hostIndex++);
+        if (!retrySourceBind && hostCount() <= m_hostIndex) { finish(false, {}, "all HTTPS echo endpoints failed"); return; }
+        const QString host = retrySourceBind ? m_currentHost : hostAt(m_hostIndex++);
+        if (!retrySourceBind) m_currentHost = host;
         m_endpointIndex = m_hostIndex;
         m_wire.clear();
         m_tlsErrorCount = 0;
@@ -443,6 +463,9 @@ private:
         });
         connect(socket, &QSslSocket::errorOccurred, this, [this, attempt](QAbstractSocket::SocketError error) {
             if (m_finished || attempt != m_attempt) return;
+            // QSslSocket may emit synchronously from bind(). That error belongs
+            // to the source-bind decision below, never to endpoint failover.
+            if (m_sourceBindInProgress || m_sourceBindWaiting) return;
             m_lastSocketError = int(error);
             const QString socketError = m_socket ? m_socket->errorString() : QStringLiteral("socket failed");
             const auto opensslCodes = mayak::diagnostics::openSslErrorCodeTokens(socketError);
@@ -495,11 +518,63 @@ private:
         m_binderOk = m_localMatch = m_fdValid = false;
         m_boundFd = -1;
         m_boundPort = 0;
+#ifdef Q_OS_WIN
+        mayak::tunnel::InterfaceIdentity resolvedIdentity;
+        if (!mayak::tunnel::resolveInterface(
+                mayak::tunnel::interfaceCandidates(QNetworkInterface::allInterfaces()),
+                m_request.interfaceName, m_request.localAddress, &resolvedIdentity)) {
+            finish(false, {}, "AWG interface identity is missing, ambiguous, or does not own the source address"); return;
+        }
+        if (retrySourceBind) {
+            if (resolvedIdentity != m_boundInterfaceIdentity) {
+                finish(false, {}, "AWG interface identity changed during source bind wait"); return;
+            }
+        } else {
+            m_boundInterfaceIdentity = resolvedIdentity;
+        }
+        m_boundInterfaceIndex = m_boundInterfaceIdentity.index;
+#else
         const auto iface = QNetworkInterface::interfaceFromName(m_request.interfaceName);
         m_boundInterfaceIndex = iface.index();
-        if (!interfaceIdentityMatches() || !m_socket->bind(m_request.localAddress, 0)) {
+#endif
+        if (!interfaceIdentityMatches()) {
+            finish(false, {}, "AWG interface identity changed before source bind"); return;
+        }
+        m_sourceBindInProgress = true;
+#ifdef MAYAK_TUNNEL_PROBE_TESTING
+        const bool injectedBindFailure = m_testSourceBindFailures > 0;
+        if (injectedBindFailure) --m_testSourceBindFailures;
+        if (injectedBindFailure)
+            emit m_socket->errorOccurred(QAbstractSocket::SocketError(m_request.testSourceBindError));
+        const bool sourceBound = !injectedBindFailure && m_socket->bind(m_request.localAddress, 0);
+        const int bindError = injectedBindFailure ? m_request.testSourceBindError : int(m_socket->error());
+#else
+        const bool sourceBound = m_socket->bind(m_request.localAddress, 0);
+        const int bindError = int(m_socket->error());
+#endif
+        m_sourceBindInProgress = false;
+        if (!sourceBound) {
+#ifdef Q_OS_WIN
+            if (bindError == int(QAbstractSocket::SocketAddressNotAvailableError)) {
+                m_sourceBindWaiting = true;
+#ifdef MAYAK_TUNNEL_PROBE_TESTING
+                m_testIdentityDriftDuringBindWait = m_request.testIdentityDriftDuringBindWait;
+#endif
+                logStage(QStringLiteral("source_bind_wait"), QStringLiteral("socket_error=%1").arg(bindError));
+                const qint64 remaining = qint64(m_request.deadlineMs) - m_elapsed.elapsed();
+                if (remaining <= 0) { finish(false, {}, "probe deadline exceeded"); return; }
+                int delay = 50;
+#ifdef MAYAK_TUNNEL_PROBE_TESTING
+                delay = qMax(1, m_request.testBindRetryIntervalMs);
+#endif
+                m_bindRetry->start(int(qMin<qint64>(delay, remaining)));
+                return;
+            }
+#endif
+            logStage(QStringLiteral("source_bind_failed"), QStringLiteral("socket_error=%1").arg(bindError));
             finish(false, {}, "AWG interface/address bind failed"); return;
         }
+        m_sourceBindWaiting = false;
         m_boundFd = m_socket->socketDescriptor();
         m_boundPort = m_socket->localPort();
         if (!sourceIdentityMatches()) {
@@ -553,11 +628,22 @@ private:
     }
 
     bool interfaceIdentityMatches() const {
+#ifdef MAYAK_TUNNEL_PROBE_TESTING
+        if (m_testIdentityDriftDuringBindWait) return false;
+#endif
+#ifdef Q_OS_WIN
+        mayak::tunnel::InterfaceIdentity current;
+        return mayak::tunnel::resolveInterface(
+                   mayak::tunnel::interfaceCandidates(QNetworkInterface::allInterfaces()),
+                   m_request.interfaceName, m_request.localAddress, &current) &&
+               current == m_boundInterfaceIdentity && current.index == m_boundInterfaceIndex;
+#else
         const auto iface = QNetworkInterface::interfaceFromName(m_request.interfaceName);
         if (!iface.isValid() || m_boundInterfaceIndex <= 0 || iface.index() != m_boundInterfaceIndex) return false;
         for (const auto &entry : iface.addressEntries())
             if (entry.ip() == m_request.localAddress) return true;
         return false;
+#endif
     }
 
     bool sourceIdentityMatches() {
@@ -612,11 +698,19 @@ private:
     const quint64 m_generation;
     const MayakTunnelProbeRequest m_request;
     QTimer *m_deadline;
+    QTimer *m_bindRetry;
     QPointer<QSslSocket> m_socket;
     QByteArray m_wire;
     int m_hostIndex = 0;
+    QString m_currentHost;
+#ifdef MAYAK_TUNNEL_PROBE_TESTING
+    int m_testSourceBindFailures = m_request.testSourceBindFailures;
+    bool m_testIdentityDriftDuringBindWait = false;
+#endif
     int m_attempt = 0;
     bool m_finished = false;
+    bool m_sourceBindInProgress = false;
+    bool m_sourceBindWaiting = false;
     mutable QElapsedTimer m_elapsed;
     int m_endpointIndex = 0;
     int m_lastSocketState = int(QAbstractSocket::UnconnectedState);
@@ -632,6 +726,9 @@ private:
     qintptr m_boundFd = -1;
     quint16 m_boundPort = 0;
     int m_boundInterfaceIndex = 0;
+#ifdef Q_OS_WIN
+    mayak::tunnel::InterfaceIdentity m_boundInterfaceIdentity;
+#endif
     bool m_binderOk = false;
     bool m_localMatch = false;
     bool m_fdValid = false;

@@ -6,6 +6,7 @@
 #include <QFile>
 #include <QSignalSpy>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <QUrlQuery>
 #include <QNetworkInterface>
 #ifdef Q_OS_WIN
@@ -370,6 +371,87 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(callbacks, 1, 2000);
         QTRY_VERIFY(ownerGuard.isNull());
         QTest::qWait(100); QCOMPARE(callbacks, 1);
+    }
+    void windowsSourceBindRetryEventuallyStrictlyBindsBeforeDns() {
+#ifndef Q_OS_WIN
+        QSKIP("Windows source-bind retry regression");
+#else
+        Capture capture;
+        TrustScope trust;
+        LocalEcho server("valid-length"); QVERIFY(server.listen(QHostAddress::LocalHost));
+        auto request = requestFor(server, 1200); request.testSourceBindFailures = 2;
+        request.testBindRetryIntervalMs = 10;
+        request.testConnectDelayMs = 1000;
+        MayakTunnelProbe probe; QSignalSpy finished(&probe, &MayakTunnelProbe::finished);
+        probe.start(request);
+        QTRY_COMPARE_WITH_TIMEOUT(probeMessages.filter("event=platform_bound").size(), 1, 300);
+        const auto sockets = probe.findChildren<QSslSocket *>(); QVERIFY(!sockets.isEmpty());
+        auto *socket = sockets.constLast();
+        QVERIFY(socket->state() == QAbstractSocket::BoundState);
+        QVERIFY(socket->socketDescriptor() >= 0);
+        QCOMPARE(socket->localAddress(), request.localAddress);
+        QCOMPARE(probeMessages.filter("event=source_bind_wait").size(), 2);
+        QCOMPARE(probeMessages.filter("event=platform_bound").size(), 1);
+        QVERIFY(probeMessages.filter("event=host_found").isEmpty());
+        QTimer::singleShot(50, &probe, &MayakTunnelProbe::cancel);
+        QTest::qWait(120); QCOMPARE(finished.count(), 0);
+        QCOMPARE(server.connections, 0);
+#endif
+    }
+    void windowsSourceBindRetryKeepsOriginalDeadline() {
+#ifndef Q_OS_WIN
+        QSKIP("Windows source-bind retry regression");
+#else
+        Capture capture;
+        LocalEcho server("valid-length"); QVERIFY(server.listen(QHostAddress::LocalHost));
+        auto request = requestFor(server, 180); request.testSourceBindFailures = 100;
+        request.testBindRetryIntervalMs = 20;
+        MayakTunnelProbe probe; QSignalSpy finished(&probe, &MayakTunnelProbe::finished);
+        QElapsedTimer elapsed; elapsed.start(); probe.start(request);
+        QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 600);
+        QVERIFY(!finished.first().at(1).toBool());
+        QCOMPARE(finished.first().at(3).toString(), QString("probe deadline exceeded"));
+        QVERIFY(elapsed.elapsed() < 450);
+        QVERIFY(probeMessages.filter("event=host_found").isEmpty());
+        for (auto *timer : probe.findChildren<QTimer *>()) QVERIFY(!timer->isActive());
+        QCOMPARE(server.connections, 0);
+#endif
+    }
+    void windowsSourceBindRetryCancellationAndOtherErrorsAreTerminal() {
+#ifndef Q_OS_WIN
+        QSKIP("Windows source-bind retry regression");
+#else
+        LocalEcho server("valid-length"); QVERIFY(server.listen(QHostAddress::LocalHost));
+        auto request = requestFor(server, 1000); request.testSourceBindFailures = 100;
+        request.testBindRetryIntervalMs = 100;
+        MayakTunnelProbe probe; QSignalSpy finished(&probe, &MayakTunnelProbe::finished);
+        probe.start(request);
+        QTRY_VERIFY_WITH_TIMEOUT([&] {
+            int active = 0;
+            for (auto *timer : probe.findChildren<QTimer *>()) if (timer->isActive()) ++active;
+            return active >= 2;
+        }(), 200);
+        QTimer::singleShot(10, &probe, &MayakTunnelProbe::cancel);
+        QTest::qWait(150); QCOMPARE(finished.count(), 0); QCOMPARE(server.connections, 0);
+        QVERIFY(probe.findChildren<QTimer *>().isEmpty());
+
+        request.testSourceBindFailures = 1; request.testSourceBindError = int(QAbstractSocket::NetworkError);
+        MayakTunnelProbe other; QSignalSpy otherFinished(&other, &MayakTunnelProbe::finished);
+        other.start(request);
+        QTRY_COMPARE_WITH_TIMEOUT(otherFinished.count(), 1, 300);
+        QVERIFY(!otherFinished.first().at(1).toBool());
+        QVERIFY(otherFinished.first().at(3).toString().contains("bind failed"));
+        QCOMPARE(server.connections, 0);
+
+        request.testSourceBindFailures = 1; request.testSourceBindError = 9;
+        request.testIdentityDriftDuringBindWait = true; request.testBindRetryIntervalMs = 10;
+        MayakTunnelProbe drift; QSignalSpy driftFinished(&drift, &MayakTunnelProbe::finished);
+        drift.start(request);
+        QTRY_COMPARE_WITH_TIMEOUT(driftFinished.count(), 1, 300);
+        QVERIFY(!driftFinished.first().at(1).toBool());
+        QVERIFY(driftFinished.first().at(3).toString().contains("identity changed"));
+        QCOMPARE(server.connections, 0);
+#endif
     }
 };
 QTEST_GUILESS_MAIN(LocalTlsProbeTests)

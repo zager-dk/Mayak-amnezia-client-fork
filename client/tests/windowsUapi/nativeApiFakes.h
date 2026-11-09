@@ -8,15 +8,24 @@
 #include <fwpmu.h>
 #include <QByteArray>
 #include <QList>
+#include <QtCore>
+// Keep private-method linkage identical in every fixture translation unit;
+// MSVC encodes access in symbols used by the terminal-failure regression.
+#define private public
+#include "platforms/windows/daemon/windowstunnelservice.h"
+#undef private
 namespace testapi {
 struct State {
   bool preexisting = false, created = false, running = false;
+  bool terminalStart = false;
+  DWORD serviceExitCode = ERROR_SUCCESS, serviceSpecificExitCode = 0;
   bool createOk = true, describeOk = true, startOk = true, stopOk = true, deleteOk = true;
   bool openPipeOk = true, writeOk = true, shortWrite = false, readOk = true;
   bool zeroRead = false, pendingRead = false, luidOk = true;
   int creates = 0, controls = 0, deletes = 0, closedServices = 0, changes = 0;
   int reads = 0, writes = 0, cancels = 0, routeDeletes = 0;
   int wfpDeletes = 0, wfpCommits = 0, wfpAborts = 0;
+  int sleeps = 0;
   DWORD error = ERROR_SUCCESS, routeDeleteResult = NO_ERROR;
   DWORD wfpDeleteResult = ERROR_SUCCESS, wfpCommitResult = ERROR_SUCCESS;
   QByteArray reply = "errno=0\n\n";
@@ -34,9 +43,13 @@ inline SC_HANDLE createService() {
   state.created = true; return reinterpret_cast<SC_HANDLE>(2);
 }
 inline BOOL changeService() { ++state.changes; return state.describeOk; }
-inline BOOL startService() { state.running = state.startOk; return state.startOk; }
+inline BOOL startService() { state.running = state.startOk && !state.terminalStart; return state.startOk; }
 inline BOOL queryService(SERVICE_STATUS* status) {
-  *status = {}; status->dwCurrentState = state.running ? SERVICE_RUNNING : SERVICE_STOPPED; return TRUE;
+  *status = {};
+  status->dwCurrentState = state.running ? SERVICE_RUNNING : SERVICE_STOPPED;
+  status->dwWin32ExitCode = state.serviceExitCode;
+  status->dwServiceSpecificExitCode = state.serviceSpecificExitCode;
+  return TRUE;
 }
 inline BOOL controlService(SERVICE_STATUS* status) {
   ++state.controls;
@@ -87,7 +100,7 @@ inline DWORD routeTable(PMIB_IPFORWARD_TABLE2* table) {
 #define QueryServiceStatus(service, status) testapi::queryService(status)
 #define ControlService(service, control, status) testapi::controlService(status)
 #define DeleteService(...) testapi::deleteService()
-#define Sleep(...) ((void)0)
+#define Sleep(...) (++testapi::state.sleeps)
 #define GetLastError() (testapi::state.error)
 #define WaitNamedPipeW(...) TRUE
 #define CreateFileW(...) testapi::openPipe()

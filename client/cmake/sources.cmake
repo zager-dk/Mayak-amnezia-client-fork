@@ -225,6 +225,8 @@ set(COMMON_FILES_CPP
     ${CLIENT_ROOT_DIR}/core/controllers/api/mayakAdmissionClient.cpp
     ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelProbe.h
     ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelProbe.cpp
+    ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelInterfaceResolver.h
+    ${CLIENT_ROOT_DIR}/core/utils/mayakTunnelInterfaceResolver.cpp
 )
 
 file(GLOB_RECURSE PAGE_LOGIC_H CONFIGURE_DEPENDS ${CLIENT_ROOT_DIR}/ui/pages_logic/*.h)

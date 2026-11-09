@@ -10,6 +10,7 @@ p.add_argument('--cmake', default='cmake')
 p.add_argument('--ninja', default='ninja')
 p.add_argument('--build-root', required=True, type=Path)
 p.add_argument('--report', type=Path)
+p.add_argument('--case', action='append', default=[], help='QtTest slot name to run (repeatable)')
 args=p.parse_args()
 here=Path(__file__).resolve().parent
 client=here.parents[2]
@@ -20,11 +21,11 @@ project(MayakProbeHttpClose LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_AUTOMOC ON)
 find_package(Qt6 6.10.3 REQUIRED COMPONENTS Core Network Test)
-add_executable(local_tls_probe_tests "{(here/'localTlsProbeTests.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelProbe.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelProbe.h').as_posix()}")
+add_executable(local_tls_probe_tests "{(here/'localTlsProbeTests.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelProbe.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelProbe.h').as_posix()}" "{(client/'core/utils/mayakTunnelInterfaceResolver.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelInterfaceResolver.h').as_posix()}")
 target_include_directories(local_tls_probe_tests PRIVATE "{(client/'core/utils').as_posix()}")
 target_compile_definitions(local_tls_probe_tests PRIVATE MAYAK_TUNNEL_PROBE_TESTING)
 target_link_libraries(local_tls_probe_tests PRIVATE Qt6::Core Qt6::Network Qt6::Test)
-add_library(probe_production_compile OBJECT "{(client/'core/utils/mayakTunnelProbe.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelProbe.h').as_posix()}")
+add_library(probe_production_compile OBJECT "{(client/'core/utils/mayakTunnelProbe.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelProbe.h').as_posix()}" "{(client/'core/utils/mayakTunnelInterfaceResolver.cpp').as_posix()}" "{(client/'core/utils/mayakTunnelInterfaceResolver.h').as_posix()}")
 target_link_libraries(probe_production_compile PRIVATE Qt6::Core Qt6::Network)
 if(WIN32)
   target_link_libraries(local_tls_probe_tests PRIVATE ws2_32)
@@ -38,6 +39,7 @@ with tempfile.TemporaryDirectory(prefix='mayak-local-tls-', dir=args.build_root.
  env=dict(os.environ);env['PATH']=str(args.qt.resolve()/'bin')+os.pathsep+env.get('PATH','');env['MAYAK_LOCAL_TLS_FIXTURE_DIR']=certificates
  executable=build/('local_tls_probe_tests.exe' if os.name=='nt' else 'local_tls_probe_tests')
  command=[str(executable)]
+ command+=args.case
  if args.report: command+=['-o',str(args.report.resolve())+',txt']
  result=subprocess.run(command,env=env)
 sys.exit(result.returncode)

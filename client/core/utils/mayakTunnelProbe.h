@@ -18,6 +18,10 @@ struct MayakTunnelProbeRequest {
     QString testHost;
     quint16 testPort = 0;
     int testConnectDelayMs = 0;
+    int testSourceBindFailures = 0;
+    int testSourceBindError = 9;
+    int testBindRetryIntervalMs = 25;
+    bool testIdentityDriftDuringBindWait = false;
 #endif
 };
 
