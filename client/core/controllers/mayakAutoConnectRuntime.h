@@ -2,6 +2,7 @@
 
 #include <QObject>
 #include <QPointer>
+#include <QVariantMap>
 #include <memory>
 #include "core/controllers/mayakBackendBridge.h"
 #include "core/controllers/api/mayakAdmissionClient.h"
@@ -30,11 +31,13 @@ public:
     bool busy() const;
     QString message() const { return m_message; }
     QString connectionPhase() const { return m_connectionPhase; }
+    QVariantMap exitLocation() const { return m_exitLocation; }
 signals:
     void stateChanged(Vpn::ConnectionState state, const QString& message);
 private:
     struct Session;
-    void publish(Vpn::ConnectionState state, const QString& message, const QString& phase);
+    void publish(Vpn::ConnectionState state, const QString& message, const QString& phase,
+                 const QVariantMap& exitLocation = {});
     SecureQSettings* m_settings;
     QPointer<SecureServersRepository> m_servers;
     QPointer<SecureAppSettingsRepository> m_app;
@@ -45,4 +48,5 @@ private:
     std::shared_ptr<Session> m_session;
     QString m_message;
     QString m_connectionPhase = QStringLiteral("idle");
+    QVariantMap m_exitLocation;
 };

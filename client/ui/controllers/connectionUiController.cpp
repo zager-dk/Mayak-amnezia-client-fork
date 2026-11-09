@@ -137,6 +137,11 @@ bool ConnectionUiController::cleanupPending() const
     return m_connectionController->managedCleanupPending();
 }
 
+QVariantMap ConnectionUiController::exitLocation() const
+{
+    return m_connectionController->managedExitLocation();
+}
+
 void ConnectionUiController::toggleConnection()
 {
     if (cleanupPending()) { closeConnection(); return; }

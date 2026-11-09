@@ -4,6 +4,7 @@ import QtQuick.Window
 import Style 1.0
 import "../Controls2/TextTypes"
 import "../newComponents/Mayak"
+import "../MayakCity/MayakCity.js" as CityData
 
 Button {
     id: root
@@ -26,8 +27,14 @@ Button {
         }
     }
     property bool beamSettled: false
-    // V3A intentionally exposes no location DTO; never infer a city from connection/IP.
+    property bool citySceneActive: false
+    // Immutable selected-exit data is passed from PageHome; never infer a city.
+    property var exitLocation: ({ candidateId: "", cityId: "" })
     readonly property bool showUnknownCityCard: connected && archivePhase === "Connected" && beamSettled
+                                                && !(exitLocation
+                                                     && typeof exitLocation.candidateId === "string"
+                                                     && exitLocation.candidateId.length > 0
+                                                     && CityData.cityForId(exitLocation.cityId) !== null)
     onArchivePhaseChanged: if (archivePhase !== "Connected") beamSettled = false
     // Scene size is independent of the action label and adapts to the home viewport.
     property real beaconDiameter: 204
@@ -82,7 +89,9 @@ Button {
             width: parent.width
             height: implicitHeight
             text: root.text
-            color: AmneziaStyle.color.mayakInk
+            color: root.citySceneActive ? "#ECEFF6" : AmneziaStyle.color.mayakInk
+            style: root.citySceneActive ? Text.Outline : Text.Normal
+            styleColor: "#99070C18"
             lineHeight: 30 + LanguageUiController.getLineHeightAppend()
             font.pixelSize: 20
             font.weight: 700

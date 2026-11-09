@@ -200,6 +200,25 @@ bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, 
         || std::floor(revision.toDouble()) != revision.toDouble()) return fail(QStringLiteral("invalid revision or deadline"));
     if (!boundedString(obj.value(QStringLiteral("config")), 32768, &out->encodedConfig)) return fail(QStringLiteral("invalid config"));
     out->configRevision = static_cast<qint64>(revision.toDouble());
+    const QJsonValue locationValue = obj.value(QStringLiteral("exit_location"));
+    if (locationValue.isObject()) {
+        const QJsonObject location = locationValue.toObject();
+        const QJsonValue schema = location.value(QStringLiteral("schema"));
+        QString candidateId;
+        QString cityId;
+        static const QSet<QString> knownCities{QStringLiteral("oslo"), QStringLiteral("helsinki"),
+            QStringLiteral("amsterdam"), QStringLiteral("frankfurt"), QStringLiteral("stockholm")};
+        if (schema.isDouble() && schema.toInt(-1) == 1 && std::floor(schema.toDouble()) == 1.0
+            && boundedString(location.value(QStringLiteral("candidate_id")), 36, &candidateId)
+            && isGuid(candidateId) && location.value(QStringLiteral("city_id")).isString()
+            && location.value(QStringLiteral("city_id")).toString().size() <= 32) {
+            cityId = location.value(QStringLiteral("city_id")).toString();
+            if (cityId.isEmpty() || knownCities.contains(cityId)) {
+                out->exitLocationCandidateId = candidateId;
+                out->exitLocationCityId = cityId;
+            }
+        }
+    }
     return true;
 }
 
@@ -252,9 +271,13 @@ QJsonObject buildPayload(const Request &request, bool *valid)
     payload.remove(QStringLiteral("attempt_id"));
     payload.remove(QStringLiteral("candidate_id"));
     payload.remove(QStringLiteral("allocation_id"));
+    payload.remove(QStringLiteral("mayak_exit_location"));
     payload.insert(QStringLiteral("action"), request.action);
     payload.insert(QStringLiteral("attempt_id"), request.attemptId);
-    if (request.action == QStringLiteral("acquire")) payload.insert(QStringLiteral("candidate_id"), request.candidateId);
+    if (request.action == QStringLiteral("acquire")) {
+        payload.insert(QStringLiteral("candidate_id"), request.candidateId);
+        payload.insert(QStringLiteral("mayak_exit_location"), 1);
+    }
     if (request.action == QStringLiteral("proven") || request.action == QStringLiteral("release"))
         payload.insert(QStringLiteral("allocation_id"), request.allocationId);
     return payload;

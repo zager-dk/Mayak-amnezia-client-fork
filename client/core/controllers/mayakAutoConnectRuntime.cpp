@@ -85,7 +85,9 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     bool cancelled = false, preparing = true, terminal = false, reconnectWanted = false;
     bool permissionPending = false;
     bool cleanupPending = false, cleanupOperation = false;
-    quint64 cleanupGeneration = 0;
+    quint64 cleanupGeneration = 0, preflightGeneration = 0;
+    qint64 cleanupDeadline = 0;
+    bool preflightNativeOff = false;
     QString permissionRequestId;
     qint64 preflightDeadline = 0, lastMonitor = 0;
     struct Attempt {
@@ -93,13 +95,15 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         ac::Candidate candidate;
         QString allocation;
         QString encodedConfig;
+        QString exitLocationCityId;
         qint64 connectBefore = 0;
         B::Ticket ticket;
         AwgHealthContext expected;
         AwgTunnelHealth health;
         qint64 startMono = 0, startUtc = 0, healthAt = 0;
         bool started = false, stopped = false, cancelled = false, probing = false;
-        bool releasePending = false, releaseCallbackHandled = false;
+        bool releasePending = false, releaseCallbackHandled = false, releaseLateHandled = false;
+        quint64 releaseOperationId = 0;
         bool reset = false;
         quint64 baselineRx = 0, baselineTx = 0;
         ProofDone proofDone;
@@ -164,7 +168,9 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     }
     ac::Millis now() const override { return B::monotonicMillis(); }
     QString phase = QStringLiteral("preparing");
-    void output(Vpn::ConnectionState state,QString text) { if (facade) facade->publish(state,text,phase); }
+    void output(Vpn::ConnectionState state,QString text, QVariantMap exitLocation = {}) {
+        if (facade) facade->publish(state,text,phase,exitLocation);
+    }
     bool identityCurrent() const {
         if (!facade || !servers || !app || !connection || cancelled || app->mayakSessionToken().isEmpty()) return false;
         const auto cfg=servers->apiV2Config(serverId);
@@ -173,7 +179,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             cfg->apiConfig.serviceProtocol==common.value("service_protocol").toString() &&
             cfg->apiConfig.userCountryCode==common.value("user_country_code").toString();
     }
-    void failure(QString text) { preparing=false; terminal=true; phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,std::move(text)); }
+    void failure(QString text) { ++preflightGeneration; preparing=false; terminal=true; phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,std::move(text)); }
     void beginCoordinatorAfterPreflight() {
         if (cancelled || !identityCurrent()) {
             preparing=false; terminal=true;
@@ -187,7 +193,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         coordinator->begin();
     }
     void preparePermissionsAndBeginCoordinator() {
-        if (cancelled || permissionPending || coordinator) return;
+        if (cancelled || terminal || !preparing || now()>=preflightDeadline || permissionPending || coordinator) return;
         if (!identityCurrent()) { failure(QStringLiteral("Сеанс Маяка изменился. Войдите снова и повторите попытку.")); return; }
         permissionPending=true;
         permissionRequestId=randomId();
@@ -223,15 +229,59 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         authority={endpoint,common.value("installation_uuid").toString(),keys.wireGuardClientPubKey,
             cfg->authData.toJson().value("api_key").toString(),cfg->serviceType(),QStringLiteral("awg"),cfg->apiConfig.userCountryCode,{}};
         preflightDeadline=now()+10000;
-        bridge->inspectOwnBackend(now()+3000,[self](B::Inspection i) {
-            if (i.state==B::OwnState::Off) self->reconcileNext();
-            else if (i.state==B::OwnState::Active && i.recoveryTicket.valid()) {
-                self->bridge->cancel(i.recoveryTicket);
-                self->bridge->stopAndConfirm(i.recoveryTicket,self->now()+3000,[self](B::Result r) {
-                    if(r.outcome==B::Outcome::ConfirmedDown) self->reconcileNext();
-                    else self->failure(errorText(ac::ErrorCategory::StopUnconfirmed));
+        inspectPreflight();
+        timer.start();
+    }
+    bool nativeDown() const {
+        if (!preflightNativeOff) return false;
+        for (const auto& [tag,a]:attempts) if (a->started && !a->stopped) return false;
+        return true;
+    }
+    QString cleanupText() const {
+        return nativeDown()
+            ? QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора.")
+            : QStringLiteral("Не удалось подтвердить отключение. Нажмите «Повторить отключение».");
+    }
+    bool finishCleanup() {
+        const auto loaded=store->load();
+        if (!loaded.ok || !loaded.records.isEmpty() || !nativeDown()) return false;
+        cleanupPending=false; cleanupOperation=false; cancelled=true;
+        preparing=false; terminal=true; reconnectWanted=false; timer.stop();
+        phase=QStringLiteral("cancelled"); output(Vpn::ConnectionState::Disconnected,{});
+        return true;
+    }
+    void inspectPreflight() {
+        auto self=shared_from_this();
+        const auto deadline=cleanupOperation ? qMin(now()+3000,cleanupDeadline) : now()+3000;
+        bridge->inspectOwnBackend(deadline,[self](B::Inspection i) {
+            if (i.state==B::OwnState::Off) {
+                self->preflightNativeOff=true;
+                if (self->cancelled) {
+                    self->cleanupOperation=false;
+                    if (!self->finishCleanup()) {
+                        self->cleanupPending=true;
+                        self->phase=QStringLiteral("failed");
+                        self->output(Vpn::ConnectionState::Error,self->cleanupText());
+                    }
+                } else if (!self->terminal) self->reconcileNext();
+            } else if (i.state==B::OwnState::Active && i.recoveryTicket.valid()) {
+                const auto ticket=i.recoveryTicket;
+                self->bridge->cancel(ticket);
+                self->bridge->stopAndConfirm(ticket,self->cleanupOperation ? qMin(self->now()+3000,self->cleanupDeadline) : self->now()+3000,[self,ticket](B::Result r) {
+                    self->cleanupOperation=false;
+                    if (r.outcome==B::Outcome::ConfirmedDown && ticket.same(r.ticket)) {
+                        self->preflightNativeOff=true;
+                        if (self->cancelled) {
+                            if (!self->finishCleanup()) self->cleanupPending=true;
+                        } else if (!self->terminal) self->reconcileNext();
+                    } else {
+                        if (self->cancelled) self->cleanupPending=true;
+                        self->failure(errorText(ac::ErrorCategory::StopUnconfirmed));
+                    }
                 });
             } else {
+                self->cleanupOperation=false;
+                if (self->cancelled) self->cleanupPending=true;
 #ifdef Q_OS_ANDROID
                 self->failure(QStringLiteral("Служба VPN Android не ответила. Закройте и снова откройте Маяк. Если ошибка повторится, проверьте обновления."));
 #else
@@ -239,10 +289,10 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
 #endif
             }
         });
-        timer.start();
     }
     void reconcileNext() {
-        if (cancelled) return;
+        if (cancelled || terminal || !preparing) return;
+        if (now()>=preflightDeadline) { failure(QStringLiteral("Завершаем прежнее подключение. Повторите попытку.")); return; }
         auto self=shared_from_this();
         const auto loaded=store->load();
         if (!loaded.ok) { failure(QStringLiteral("Хранилище доступа недоступно. Подключение остановлено.")); return; }
@@ -252,14 +302,44 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             ad::Request req; req.action="reconcile"; req.attemptId=r.identity().attemptId; req.cycleToken=r.identity().cycleToken;
             req.commonPayload=payloadFor(r); req.deadlineUtcMs=utcDeadline(preflightDeadline);
             ++inFlight;
-            ad::MayakAdmissionClient::postAsync(req,transport,[self,r](ad::Response response) {
-                --self->inFlight;
-                if (self->cancelled) return;
-                if (!response.success || !response.authenticatedResponse || !self->store->removeAfterConfirmedCleanup(r.identity()).ok) {
-                    self->failure(QStringLiteral("Не удалось завершить прежний сеанс. Проверьте интернет и повторите попытку.")); return;
+            auto settled=std::make_shared<bool>(false);
+            auto lateHandled=std::make_shared<bool>(false);
+            auto timedOutSeen=std::make_shared<bool>(false);
+            std::weak_ptr<Session> weak=self;
+            const auto generation=preflightGeneration, cleanupOwner=cleanupGeneration;
+            auto settle=[weak,r,generation,cleanupOwner,settled,lateHandled,timedOutSeen](ad::Response response, bool timedOut) {
+                auto self=weak.lock(); if (!self) return;
+                if (*settled && !(timedOut == false && *timedOutSeen && response.success && response.authenticatedResponse && !*lateHandled)) return;
+                const bool first=!(*settled); *settled=true;
+                if (timedOut) *timedOutSeen=true;
+                if (!first) *lateHandled=true;
+                if (first) --self->inFlight;
+                // Settlement belongs to this old operation even after cancel;
+                // presentation belongs only to the still-current ON intent.
+                const auto currentPreflight=[&] {
+                    return first && generation==self->preflightGeneration
+                        && cleanupOwner==self->cleanupGeneration && self->preparing && !self->terminal
+                        && !self->cancelled && !self->cleanupPending && !self->cleanupOperation;
+                };
+                if (timedOut) {
+                    if (currentPreflight()) self->failure(QStringLiteral("Не удалось завершить прежний сеанс. Проверьте интернет и повторите попытку."));
+                    return;
                 }
-                self->reconcileNext();
-            }); return;
+                if (!response.success || !response.authenticatedResponse) {
+                    if (currentPreflight()) self->failure(QStringLiteral("Не удалось завершить прежний сеанс. Проверьте интернет и повторите попытку."));
+                    return;
+                }
+                if (!self->store->removeAfterConfirmedCleanup(r.identity()).ok) {
+                    if (currentPreflight()) self->failure(QStringLiteral("Не удалось сохранить завершение прежнего сеанса. Повторите попытку."));
+                    return;
+                }
+                // Authenticated late cleanup may discharge only its exact old
+                // obligation. It cannot revive a failed/cancelled ON intent.
+                if (self->cancelled && !self->cleanupOperation) self->finishCleanup();
+                else if (currentPreflight() && self->now()<self->preflightDeadline) self->reconcileNext();
+            };
+            QTimer::singleShot(2500,this,[settle] { settle({},true); });
+            ad::MayakAdmissionClient::postAsync(req,transport,[settle](ad::Response response) { settle(response,false); }); return;
         }
         preparePermissionsAndBeginCoordinator();
     }
@@ -283,17 +363,22 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         case ac::State::Starting: case ac::State::Verifying:
             output(Vpn::ConnectionState::Connecting,QStringLiteral("Проверяем VPN-соединение…")); break;
         case ac::State::Connected:
-            lastMonitor=now(); output(Vpn::ConnectionState::Connected,QStringLiteral("Подключено")); break;
+            lastMonitor=now(); {
+                QVariantMap location;
+                const auto selected = get(s.cycle, s.attempt);
+                if (selected && !selected->cancelled) {
+                    location.insert(QStringLiteral("candidateId"), selected->identity.candidateId);
+                    location.insert(QStringLiteral("cityId"), selected->exitLocationCityId);
+                }
+                output(Vpn::ConnectionState::Connected,QStringLiteral("Подключено"),location);
+            } break;
         case ac::State::Stopping:
             output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…")); break;
         case ac::State::Failed:
             terminal=true;
             if (s.error==ac::ErrorCategory::StopUnconfirmed) {
                 cleanupPending=true;
-                auto attempt=get(s.cycle,s.attempt);
-                output(Vpn::ConnectionState::Error,attempt && attempt->stopped
-                    ? QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора.")
-                    : QStringLiteral("Не удалось подтвердить отключение. Нажмите «Повторить отключение»."));
+                output(Vpn::ConnectionState::Error,cleanupText());
             } else output(Vpn::ConnectionState::Error,errorText(s.error));
             break;
         case ac::State::Cancelled: case ac::State::Idle:
@@ -301,35 +386,48 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         }
     }
     void stopUser() {
-        cancelled=true; reconnectWanted=false;
+        cancelled=true; reconnectWanted=false; ++preflightGeneration;
         if (!permissionRequestId.isEmpty()) {
             bridge->cancelPermissionPreparation(permissionRequestId);
             permissionRequestId.clear(); permissionPending=false;
         }
         for(auto& [tag,a]:attempts) { a->cancelled=true; if(a->ticket.valid()) bridge->cancel(a->ticket); }
         if(coordinator) coordinator->cancel();
-        else { preparing=false; terminal=true; timer.stop(); phase=QStringLiteral("cancelled"); output(Vpn::ConnectionState::Disconnected,{}); }
+        else {
+            preparing=false; terminal=true;
+            if (!finishCleanup()) {
+                cleanupPending=true;
+                phase=QStringLiteral("failed");
+                output(Vpn::ConnectionState::Error,errorText(ac::ErrorCategory::StopUnconfirmed));
+            }
+        }
     }
-    void retryCleanup() {
+    void retryCleanup(bool continuation=false) {
         if (!cleanupPending || cleanupOperation || !facade) return;
         // The coordinator owns its first exact release request. Never race it
         // with reconciliation of the same encrypted attempt.
         for (const auto& [tag,attempt] : attempts)
             if (attempt->releasePending) return;
+        for (const auto& [tag,attempt] : attempts) attempt->releaseOperationId=0;
+        if (!continuation) cleanupDeadline=now()+10000;
+        if (finishCleanup()) return;
+        if (now()>=cleanupDeadline) {
+            phase=QStringLiteral("failed");
+            output(Vpn::ConnectionState::Error,QStringLiteral("Очистка доступа ожидает повтора. Нажмите «Повторить отключение».")); return;
+        }
+        if (!coordinator && !preflightNativeOff) {
+            cleanupOperation=true; inspectPreflight(); return;
+        }
         const auto loaded=store->load();
         if (!loaded.ok || loaded.records.isEmpty()) {
-            bool confirmed=false;
-            for (const auto& [tag,attempt] : attempts)
-                if (attempt->stopped && !attempt->allocation.isEmpty()) { confirmed=true; break; }
-            if (loaded.ok && confirmed) {
-                cleanupPending=false; cancelled=true; terminal=true; timer.stop();
-                phase=QStringLiteral("cancelled");
-                output(Vpn::ConnectionState::Disconnected,{});
-            } else { phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось проверить сохранённую очистку. Отключение остаётся неподтверждённым.")); }
+            phase=QStringLiteral("failed"); output(Vpn::ConnectionState::Error,QStringLiteral("Не удалось проверить сохранённую очистку. Отключение остаётся неподтверждённым."));
             return;
         }
         const auto record=loaded.records.first();
-        if (record.mayHaveStarted()) {
+        // Before coordinator creation a fresh own-backend OFF/recovery-stop
+        // barrier covers persisted records from a prior process. Once native
+        // starts are possible, each relevant current ticket needs its own down.
+        if (record.mayHaveStarted() && (coordinator || !preflightNativeOff)) {
             std::shared_ptr<Attempt> attempt;
             for (const auto& [tag,candidate] : attempts)
                 if (candidate->identity==record.identity()) { attempt=candidate; break; }
@@ -342,10 +440,10 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 const quint64 generation=++cleanupGeneration;
                 bridge->cancel(attempt->ticket);
                 auto self=shared_from_this();
-                bridge->stopAndConfirm(attempt->ticket,now()+3000,[self,attempt,generation](B::Result result) {
+                bridge->stopAndConfirm(attempt->ticket,qMin(now()+3000,cleanupDeadline),[self,attempt,generation](B::Result result) {
                     attempt->acceptNativeDown(result);
                     if (generation!=self->cleanupGeneration) {
-                        if (attempt->stopped && !self->cleanupOperation) self->retryCleanup();
+                        if (attempt->stopped && !self->cleanupOperation) self->retryCleanup(true);
                         return;
                     }
                     if (!attempt->stopped) {
@@ -355,7 +453,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                         return;
                     }
                     self->cleanupOperation=false;
-                    self->retryCleanup();
+                    self->retryCleanup(true);
                 });
                 return;
             }
@@ -365,23 +463,42 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         const quint64 generation=++cleanupGeneration;
         ad::Request request; request.action="reconcile"; request.attemptId=record.identity().attemptId;
         request.cycleToken=record.identity().cycleToken; request.commonPayload=payloadFor(record);
-        request.deadlineUtcMs=utcDeadline(now()+2500);
+        const auto operationDeadline=qMin(now()+2500,cleanupDeadline);
+        request.deadlineUtcMs=utcDeadline(operationDeadline);
         ++inFlight;
         auto self=shared_from_this();
-        ad::MayakAdmissionClient::postAsync(request,transport,[self,record,generation](ad::Response response) {
-            --self->inFlight;
+        auto settled=std::make_shared<bool>(false);
+        auto lateHandled=std::make_shared<bool>(false);
+        auto timedOutSeen=std::make_shared<bool>(false);
+        std::weak_ptr<Session> weak=self;
+        auto finish=[weak,record,generation,settled,lateHandled,timedOutSeen](ad::Response response, bool timedOut) {
+            auto self=weak.lock(); if (!self) return;
+            if (*settled && !(timedOut == false && *timedOutSeen && response.success && response.authenticatedResponse && !*lateHandled)) return;
+            const bool first=!(*settled); *settled=true;
+            if (timedOut) *timedOutSeen=true;
+            if (!first) *lateHandled=true;
+            if (first) --self->inFlight;
             if (generation!=self->cleanupGeneration) return;
-            self->cleanupOperation=false;
+            if (first) self->cleanupOperation=false;
+            // Another authenticated operation may already have durably settled
+            // this exact record. A later negative/timeout cannot reopen it.
+            if (self->finishCleanup()) return;
+            if (timedOut) {
+                self->cleanupPending=true;
+                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,self->cleanupText());
+                return;
+            }
             if (!response.success || !response.authenticatedResponse ||
                 !self->store->removeAfterConfirmedCleanup(record.identity()).ok) {
                 self->cleanupPending=true;
-                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора."));
+                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,self->cleanupText());
                 return;
             }
-            self->cleanupPending=false; self->cancelled=true; self->terminal=true; self->timer.stop();
-            self->phase=QStringLiteral("cancelled");
-            self->output(Vpn::ConnectionState::Disconnected,{});
-        });
+            self->cleanupPending=true;
+            self->retryCleanup(true);
+        };
+        QTimer::singleShot(qMax<qint64>(0,operationDeadline-now()),this,[finish] { finish({},true); });
+        ad::MayakAdmissionClient::postAsync(request,transport,[finish](ad::Response response) { finish(response,false); });
     }
     void fetchFresh(ac::CycleId c,ac::AttemptId a,ac::Millis deadline,FetchDone done) override { fetch(c,a,deadline,0,std::move(done)); }
     void fetch(ac::CycleId c,ac::AttemptId a,ac::Millis deadline,int retry,FetchDone done) {
@@ -432,6 +549,8 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             --self->inFlight;
             if(r.authenticatedResponse && r.acquireValid && r.success) {
                 a->allocation=r.acquire.allocationId; a->encodedConfig=r.acquire.encodedConfig;
+                if (r.acquire.exitLocationCandidateId.compare(a->identity.candidateId, Qt::CaseInsensitive) == 0)
+                    a->exitLocationCityId = r.acquire.exitLocationCityId;
                 a->connectBefore=self->now()+QDateTime::currentDateTimeUtc().msecsTo(r.acquire.connectBefore);
                 // Pre-send record remains sufficient for exact cleanup if this write fails.
                 const bool saved=self->store->attachAllocation(a->identity,a->allocation).ok;
@@ -529,14 +648,31 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             return;
         }
         qInfo() << "MayakRelease started=true";
-        a->releasePending=true; a->releaseCallbackHandled=false;
+        if (!cleanupDeadline || now()>=cleanupDeadline) cleanupDeadline=now()+10000;
+        a->releasePending=true; a->releaseCallbackHandled=false; a->releaseLateHandled=false;
         auto self=shared_from_this(); ad::Request req; req.action="release"; req.attemptId=a->identity.attemptId;
         req.cycleToken=a->identity.cycleToken; req.allocationId=a->allocation; req.commonPayload=common; req.deadlineUtcMs=utcDeadline(now()+2500);
         ++inFlight;
-        ad::MayakAdmissionClient::postAsync(req,transport,[self,a,c,n,done](ad::Response r) {
-            if (a->releaseCallbackHandled) return;
-            a->releaseCallbackHandled=true; a->releasePending=false;
-            --self->inFlight;
+        const quint64 operation=++cleanupGeneration;
+        a->releaseOperationId=operation;
+        auto settled=std::make_shared<bool>(false);
+        auto timedOutSeen=std::make_shared<bool>(false);
+        std::weak_ptr<Session> weak=self;
+        auto finish=[weak,a,c,n,done,settled,timedOutSeen,operation](ad::Response r, bool timedOut) {
+            auto self=weak.lock(); if (!self) return;
+            if (a->releaseOperationId!=operation) return;
+            const bool first=!(*settled);
+            if (!first && (timedOut || !*timedOutSeen || a->releaseLateHandled || !r.success || !r.authenticatedResponse)) return;
+            if (first) *settled=true;
+            if (timedOut) *timedOutSeen=true;
+            else a->releaseLateHandled=true;
+            if (first) { a->releaseCallbackHandled=true; a->releasePending=false; --self->inFlight; }
+            if (timedOut) {
+                self->cleanupPending=true; self->terminal=true;
+                self->phase=QStringLiteral("failed");
+                self->output(Vpn::ConnectionState::Error,self->cleanupText());
+                return;
+            }
             qInfo() << "MayakRelease result transport_enum=" << int(r.transportError)
                     << "authenticated=" << r.authenticatedResponse
                     << "response_valid=" << r.responseValid << "success=" << r.success;
@@ -545,25 +681,47 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 qInfo() << "MayakRelease ledger_remove attempted=true ok=" << removal.ok
                         << "error_enum=" << int(removal.error);
                 if(removal.ok) {
-                    self->cleanupPending=false;
-                    if(done) done(c,n);
-                    if(self->cancelled) {
-                        self->terminal=true; self->timer.stop();
-                        self->output(Vpn::ConnectionState::Disconnected,{});
+                    const auto remaining=self->store->load();
+                    if (!remaining.ok || !remaining.records.isEmpty()) {
+                        self->cleanupPending=true;
+                        if (self->cancelled) self->retryCleanup(true);
+                    } else {
+                        // Timely completion belongs to the coordinator. A late
+                        // positive cannot resume its already terminal cycle.
+                        if (first && done) done(c,n);
+                        if (self->cancelled || !first) {
+                            self->cleanupPending=true;
+                            self->finishCleanup();
+                        }
                     }
+                } else {
+                    self->cleanupPending=true; self->terminal=true;
+                    self->phase=QStringLiteral("failed");
+                    self->output(Vpn::ConnectionState::Error,QStringLiteral("Сервер подтвердил остановку; локальная запись очистки ожидает сохранения. Нажмите «Повторить отключение»."));
                 }
             } else {
                 qInfo() << "MayakRelease ledger_remove attempted=false reason=release_not_accepted";
                 self->cleanupPending=true; self->terminal=true;
-                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,QStringLiteral("Туннель остановлен; очистка доступа на сервере ожидает повтора."));
+                self->phase=QStringLiteral("failed"); self->output(Vpn::ConnectionState::Error,self->cleanupText());
             }
-        });
+        };
+        QTimer::singleShot(2500,this,[finish] { finish({},true); });
+        ad::MayakAdmissionClient::postAsync(req,transport,[finish](ad::Response response) { finish(response,false); });
     }
     void reportProven(ac::CycleId c,ac::AttemptId n,const std::string&,BasicDone done) override {
         auto a=get(c,n); if(!a) return;
         auto self=shared_from_this(); ad::Request req; req.action="proven"; req.attemptId=a->identity.attemptId;
-        req.cycleToken=a->identity.cycleToken; req.allocationId=a->allocation; req.commonPayload=common; req.deadlineUtcMs=utcDeadline(now()+3000);
-        ++inFlight; ad::MayakAdmissionClient::postAsync(req,transport,[self,c,n,done](ad::Response) { --self->inFlight; if(done) done(c,n); });
+        req.cycleToken=a->identity.cycleToken; req.allocationId=a->allocation; req.commonPayload=common; req.deadlineUtcMs=utcDeadline(now()+2500);
+        ++inFlight;
+        auto settled=std::make_shared<bool>(false);
+        std::weak_ptr<Session> weak=self;
+        auto finish=[weak,settled,c,n,done] {
+            auto self=weak.lock(); if (!self || *settled) return;
+            *settled=true; --self->inFlight;
+            if (done && !self->terminal && !self->cancelled) done(c,n);
+        };
+        QTimer::singleShot(2500,this,finish);
+        ad::MayakAdmissionClient::postAsync(req,transport,[finish](ad::Response) { finish(); });
     }
     void cancelOwned(ac::CycleId c,ac::AttemptId n) override {
         auto a=get(c,n); if(!a) return; a->cancelled=true; a->proofDone={}; bridge->cancel(a->ticket);
@@ -597,9 +755,11 @@ MayakAutoConnectRuntime::~MayakAutoConnectRuntime() {
 }
 bool MayakAutoConnectRuntime::manages(const QString& id) const { return m_app && m_app->isMayakManagedServer(id); }
 bool MayakAutoConnectRuntime::busy() const { return m_session && (m_session->cleanupPending || !m_session->terminal || m_session->inFlight>0); }
-void MayakAutoConnectRuntime::publish(Vpn::ConnectionState state,const QString& text,const QString& phase) {
+void MayakAutoConnectRuntime::publish(Vpn::ConnectionState state,const QString& text,const QString& phase,
+                                      const QVariantMap& exitLocation) {
     m_message=text;
     m_connectionPhase=phase;
+    m_exitLocation = state == Vpn::ConnectionState::Connected ? exitLocation : QVariantMap{};
     emit stateChanged(state,text);
 }
 void MayakAutoConnectRuntime::begin(const QString& id) {

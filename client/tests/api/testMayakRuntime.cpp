@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QJsonArray>
+#include <QElapsedTimer>
 #include <QJsonDocument>
 #include <QPromise>
 #include <QSignalSpy>
@@ -12,6 +13,7 @@
 #include "core/controllers/mayakAttemptStore.h"
 #include "core/controllers/connectionController.h"
 #include "core/controllers/api/subscriptionController.h"
+#include "core/controllers/api/mayakAdmissionClient.h"
 #include "core/models/api/apiV2ServerConfig.h"
 #include "core/utils/constants/apiKeys.h"
 #include "core/utils/constants/configKeys.h"
@@ -46,13 +48,20 @@ struct World : QObject {
     int acquires=0, starts=0, releases=0, reconciles=0, stops=0;
     bool fullFirst=false, deadFirst=false, lostAcquire=false, badProof=false, holdStart=false;
     bool holdPermission=false;
+    int exitLocationMode=0; // 0 valid, 1 absent, 2 bad schema, 3 candidate mismatch, 4 unknown city
     bool backendRunning=false, missingStop=false, failRelease=false, failStopOnce=false, holdNextStop=false;
+    bool holdReleaseForever=false;
+    bool holdReconcileForever=false, holdProvenForever=false, synchronousCleanup=false;
+    bool holdInspection=false, activeInspection=false;
+    B::Inspected heldInspection; QString inspectionNonce;
+    int reconcileDelay=0;
     int releaseDelay=0;
     int acquireDelay=0;
     QString publicKey, selectedHost = "81.29.149.103";
     B::Ticket current;
     QList<B::Ticket> stopTickets;
     QList<QJsonObject> requestPayloads;
+    QList<std::shared_ptr<QPromise<GatewayPostResult>>> heldTransportPromises, allTransportPromises;
     AwgTunnelHealth health;
     std::function<void(B::Ticket,AwgTunnelHealth)> observeHealth;
     B::Done startDone;
@@ -74,7 +83,10 @@ struct World : QObject {
         B::Port port; port.owner=this;
         port.observe=[this](QObject*,auto healthCallback,auto downCallback){observeHealth=healthCallback;observeDown=downCallback;};
         port.inspect=[this](QString nonce,qint64,B::Inspected done) {
-            events<<"inspect"; done({backendRunning?B::OwnState::Unknown:B::OwnState::Off,nonce,{},{}});
+            events<<"inspect";
+            if (holdInspection) { inspectionNonce=nonce; heldInspection=done; return; }
+            if (activeInspection) { current={guid(),std::make_shared<B::StartGate>()}; current.gate->commit(); backendRunning=true; done({B::OwnState::Active,nonce,{},current}); return; }
+            done({backendRunning?B::OwnState::Unknown:B::OwnState::Off,nonce,{},{}});
         };
         port.preparePermissions=[this](QString requestId,B::PermissionDone done) {
             permissionRequestId=requestId;
@@ -112,7 +124,20 @@ struct World : QObject {
         connection.setMayakRuntime(runtime.get());
         connect(runtime.get(),&MayakAutoConnectRuntime::stateChanged,this,[this](auto value,QString){state=value;});
     }
-    ~World() {runtime.reset();settings.clearSettings();}
+    ~World() {
+        if (runtime) disconnect(runtime.get(),nullptr,this,nullptr); // test-local captures may already be gone
+        // A cancelled fixture timer must not destroy an unfinished promise and
+        // dispatch a result-less QFuture into the following test's event loop.
+        // Drain synthetic transport work while this World's repositories live.
+        for (int round=0;round<2;++round) {
+            for (const auto& p:allTransportPromises) if (!p->future().isFinished()) {
+                p->addResult({ErrorCode::NoError,QByteArrayLiteral("{}"),false}); p->finish();
+            }
+            QCoreApplication::processEvents();
+            if (!round) runtime.reset();
+        }
+        settings.clearSettings();
+    }
     QString config() {
         const QString serverPub=QString::fromLatin1(QByteArray(32,'p').toBase64());
         const QString psk=QString::fromLatin1(QByteArray(32,'s').toBase64());
@@ -160,13 +185,45 @@ struct World : QObject {
                 if(fullFirst && acquires==1) response={{"http_status",409},{"code","FULL"},{"message","full"}};
                 else { response={{"allocation_id",allocation},{"connect_before",QDateTime::currentDateTimeUtc().addSecs(30).toString(Qt::ISODateWithMs)},
                     {"config_revision",14},{"config",config()}}; trusted=!lostAcquire; }
+                if (!response.contains("http_status") && payload.value("mayak_exit_location").toInt()==1
+                    && exitLocationMode!=1) {
+                    const QString candidate=payload.value("candidate_id").toString();
+                    response.insert("exit_location",QJsonObject{{"schema",exitLocationMode==2?2:1},
+                        {"candidate_id",exitLocationMode==3?guid():candidate},
+                        {"city_id",exitLocationMode==4?QStringLiteral("unknown"):candidate==first?QStringLiteral("oslo"):QStringLiteral("helsinki")}});
+                }
             } else if(action=="release") {++releases;delay=releaseDelay;response={{"released",!backendRunning && !failRelease}};}
             else if(action=="proven") response={{"proven",true}};
-            else if(action=="reconcile") {++reconciles;response={{"reconciled",!backendRunning}};}
+            else if(action=="reconcile") {++reconciles;delay=reconcileDelay;response={{"reconciled",!backendRunning}};}
         }
         auto promise=std::make_shared<QPromise<GatewayPostResult>>();promise->start();auto future=promise->future();
-        QTimer::singleShot(delay,this,[promise,response,trusted]{promise->addResult({ErrorCode::NoError,QJsonDocument(response).toJson(QJsonDocument::Compact),trusted});promise->finish();});
+        allTransportPromises.append(promise);
+        if ((payload.value("action").toString()=="release" && holdReleaseForever)
+            || (payload.value("action").toString()=="reconcile" && holdReconcileForever)
+            || (payload.value("action").toString()=="proven" && holdProvenForever)) {
+            heldTransportPromises.append(promise);
+            return future;
+        }
+        if (synchronousCleanup && payload.value("action").toString()!="acquire") {
+            promise->addResult({ErrorCode::NoError,QJsonDocument(response).toJson(QJsonDocument::Compact),trusted}); promise->finish(); return future;
+        }
+        QTimer::singleShot(delay,this,[promise,response,trusted]{if (promise->future().isFinished()) return; promise->addResult({ErrorCode::NoError,QJsonDocument(response).toJson(QJsonDocument::Compact),trusted});promise->finish();});
         return future;
+    }
+    void seed(int count=1) {
+        mayak::attempts::MayakAttemptStore store(&settings);
+        for (int i=0;i<count;++i) {
+            mayak::attempts::AttemptInput input{{id,guid(),guid(),guid(),first},
+                {"https://mayaklight.ru/gw/",guid(),QString::fromLatin1(QByteArray(32,'k').toBase64()),
+                 "synthetic-device-credential","amnezia-premium","awg","ru",{}},false,false,{}};
+            if (!store.appendBeforeAcquire(input).ok) qFatal("Could not seed isolated test ledger");
+        }
+    }
+    void drainHeld(const QByteArray& body) {
+        for (const auto& p:heldTransportPromises) if (!p->future().isFinished()) {
+            p->addResult({ErrorCode::NoError,body,true}); p->finish();
+        }
+        QCoreApplication::processEvents();
     }
     int records() {auto result=mayak::attempts::MayakAttemptStore(&settings).load();return result.ok?result.records.size():-1;}
 };
@@ -174,6 +231,73 @@ struct World : QObject {
 class RuntimeTest : public QObject {
     Q_OBJECT
 private slots:
+    void acquireExitLocationMetadataIsOptionalAndBounded() {
+        const auto makeBody=[](QJsonValue location) {
+            QJsonObject body{{"allocation_id",guid()},
+                {"connect_before",QDateTime::currentDateTimeUtc().addSecs(30).toString(Qt::ISODateWithMs)},
+                {"config_revision",14},{"config","fixture"}};
+            if (!location.isUndefined()) body.insert("exit_location",location);
+            return QJsonDocument(body).toJson(QJsonDocument::Compact);
+        };
+        mayak::admission::AcquireResponse parsed;
+        QVERIFY(mayak::admission::parseAcquireResponse(makeBody(QJsonObject{{"schema",1},
+            {"candidate_id",guid()},{"city_id","oslo"}}),&parsed));
+        QCOMPARE(parsed.exitLocationCityId,QStringLiteral("oslo"));
+        QVERIFY(mayak::admission::parseAcquireResponse(makeBody(QJsonObject{{"schema",2},
+            {"candidate_id",guid()},{"city_id","oslo"}}),&parsed));
+        QVERIFY(parsed.exitLocationCityId.isEmpty());
+        QVERIFY(mayak::admission::parseAcquireResponse(makeBody(QJsonObject{{"schema",1},
+            {"candidate_id",guid()},{"city_id","other"}}),&parsed));
+        QVERIFY(parsed.exitLocationCityId.isEmpty());
+        QVERIFY(mayak::admission::parseAcquireResponse(makeBody(QJsonValue{}),&parsed));
+        QVERIFY(parsed.exitLocationCityId.isEmpty());
+    }
+
+    void selectedExitLocationFollowsTheConnectedFailoverAttemptAndClears() {
+        World w;
+        w.deadFirst=true;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.acquires,2);
+        QList<QJsonObject> acquireRequests;
+        for (const auto& payload : w.requestPayloads) {
+            if (payload.value("action").toString()==QStringLiteral("acquire")) acquireRequests.append(payload);
+            else QVERIFY(!payload.contains(QStringLiteral("mayak_exit_location")));
+        }
+        QCOMPARE(acquireRequests.size(),2);
+        QCOMPARE(acquireRequests.at(0).value("candidate_id").toString(),w.first);
+        QCOMPARE(acquireRequests.at(1).value("candidate_id").toString(),w.second);
+        for (const auto& payload : acquireRequests) {
+            QVERIFY(payload.value("mayak_exit_location").isDouble());
+            QCOMPARE(payload.value("mayak_exit_location").toInt(),1);
+        }
+        // The config bootstrap is also recorded by World::transport and must
+        // not opt in; it has no admission action.
+        QVERIFY(!w.requestPayloads.first().contains(QStringLiteral("action")));
+        QVERIFY(!w.requestPayloads.first().contains(QStringLiteral("mayak_exit_location")));
+        // Construct the read-only facade after the fixture is Connected so a
+        // plain QApplication never dispatches its production Connected slot
+        // that expects AmneziaApplication's network manager.
+        ConnectionUiController ui(&w.connection,nullptr);
+        QCOMPARE(ui.exitLocation().value("candidateId").toString(),w.second);
+        QCOMPARE(ui.exitLocation().value("cityId").toString(),QStringLiteral("helsinki"));
+        w.runtime->cancel();
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        QVERIFY(ui.exitLocation().isEmpty());
+    }
+
+    void absentOrMismatchedExitLocationNeverBlocksConnection() {
+        for (const int mode : {1,3,4}) {
+            World w;
+            w.exitLocationMode=mode;
+            w.runtime->begin(w.id);
+            QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+            QCOMPARE(w.runtime->exitLocation().value("cityId").toString(),QString());
+            w.runtime->cancel();
+            QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Disconnected,5000);
+        }
+    }
+
     void phaseSnapshotReportsEveryCoordinatorState() {
         World w;
         QStringList phases;
@@ -443,8 +567,10 @@ private slots:
         QCOMPARE(w.reconciles,1);w.runtime->cancel();QTRY_COMPARE(w.records(),0);
     }
     void cancellationCleansLateAcquire() {
-        World w;w.acquireDelay=300;w.runtime->begin(w.id);QTRY_COMPARE(w.acquires,1);w.runtime->cancel();
+        World w; ConnectionUiController ui(&w.connection,nullptr); w.acquireDelay=300;
+        w.runtime->begin(w.id);QTRY_COMPARE(w.acquires,1);w.runtime->cancel();
         QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);QCOMPARE(w.starts,0);QCOMPARE(w.releases,1);
+        QVERIFY(ui.exitLocation().isEmpty());
     }
     void queuedStartCannotActivateAfterCancel() {
         World w;w.holdStart=true;w.runtime->begin(w.id);QTRY_COMPARE(w.starts,1);w.runtime->cancel();
@@ -500,6 +626,259 @@ private slots:
         QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
         QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
         QVERIFY(phases.contains(QStringLiteral("cancelled")));
+    }
+    void neverFinishingReleaseSettlesAndManualRetryReconciles() {
+        World w; w.holdReleaseForever=true;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        const int starts=w.starts, acquires=w.acquires;
+        w.runtime->cancel();
+        QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),4000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("failed"));
+        QCOMPARE(w.releases,1); QCOMPARE(w.records(),1); QVERIFY(!w.backendRunning);
+        w.holdReleaseForever=false;
+        w.runtime->retryCleanup();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->cleanupPending(),3000);
+        QCOMPARE(w.reconciles,1); QCOMPARE(w.records(),0);
+        QCOMPARE(w.starts,starts); QCOMPARE(w.acquires,acquires);
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        // Let the fake transport deliver a stale negative after the retry won;
+        // this also drains its QFutureWatcher before the fixture is destroyed.
+        for (const auto& promise:w.heldTransportPromises) {
+            promise->addResult({ErrorCode::NoError,QByteArrayLiteral("{\"released\":false}"),true});
+            promise->finish();
+        }
+        QCoreApplication::processEvents();
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+    }
+    void neverProvenSettlesOnceOffAllowsNewOnAndOldReplyCannotChangeIt() {
+        World w; w.holdProvenForever=true;
+        w.runtime->begin(w.id); QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        QTRY_COMPARE(w.heldTransportPromises.size(),1);
+        w.runtime->cancel(); QTRY_COMPARE(w.records(),0);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),3000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        w.holdProvenForever=false;
+        w.runtime->begin(w.id); QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        const auto ticket=w.current;
+        w.drainHeld(QByteArrayLiteral("{\"proven\":true}"));
+        QTest::qWait(50);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("connected")); QVERIFY(w.current.same(ticket));
+        w.runtime->cancel(); QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),3000); QCOMPARE(w.records(),0);
+    }
+    void latePreflightPositiveCannotResumeFailedOn() {
+        World w; w.seed(); w.holdReconcileForever=true;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.reconciles,1);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,3000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("failed"));
+        w.drainHeld(QByteArrayLiteral("{\"reconciled\":true}"));
+        QTRY_COMPARE(w.records(),0); QTest::qWait(100);
+        QCOMPARE(w.acquires,0); QCOMPARE(w.starts,0); QVERIFY(w.permissionRequestId.isEmpty());
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("failed")); QVERIFY(!w.runtime->busy());
+        w.holdReconcileForever=false; w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        w.runtime->cancel(); QTRY_COMPARE(w.records(),0);
+    }
+    void cancelledPreflightLatePositiveOnlySettlesOldObligation() {
+        World w; w.seed(); w.holdReconcileForever=true;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.reconciles,1); w.runtime->cancel();
+        QVERIFY(w.runtime->cleanupPending());
+        w.drainHeld(QByteArrayLiteral("{\"reconciled\":true}"));
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),2000);
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected); QCOMPARE(w.acquires,0); QCOMPARE(w.starts,0);
+        w.holdReconcileForever=false; w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        w.drainHeld(QByteArrayLiteral("{\"reconciled\":true}")); QTest::qWait(50);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("connected"));
+        w.runtime->cancel(); QTRY_COMPARE(w.records(),0);
+    }
+    void stalePreflightTimeoutCannotOverwriteEarlySuccessfulCleanupRetry() {
+        World w; w.seed(); w.holdReconcileForever=true;
+        w.runtime->begin(w.id); QTRY_COMPARE_WITH_TIMEOUT(w.reconciles,1,500);
+        QElapsedTimer originalRequest; originalRequest.start(); // old timer already exists
+        w.runtime->cancel(); QVERIFY(w.runtime->cleanupPending());
+        w.holdReconcileForever=false; w.runtime->retryCleanup();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->cleanupPending(),1000);
+        QVERIFY(originalRequest.elapsed()<2000); // new retry won before the old 2500ms timeout
+        QCOMPARE(w.reconciles,2); QCOMPARE(w.records(),0);
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        QVERIFY(w.runtime->busy()); // only the original held request still owns a counter
+        QSignalSpy laterStates(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged);
+        QTest::qWait(int(qMax<qint64>(0,2700-originalRequest.elapsed())));
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        QVERIFY(!w.runtime->cleanupPending()); QVERIFY(!w.runtime->busy());
+        mayak::attempts::MayakAttemptStore reopened(&w.settings);
+        const auto ledger=reopened.load(); QVERIFY(ledger.ok); QVERIFY(ledger.records.isEmpty());
+        QCOMPARE(w.settings.storedValueClass(QStringLiteral("Mayak/pendingAttempts")),
+                 SecureQSettings::StoredValueClass::Encrypted);
+        QCOMPARE(w.acquires,0); QCOMPARE(w.starts,0);
+        for (const auto& row:laterStates) QVERIFY(row.at(0).value<Vpn::ConnectionState>()!=Vpn::ConnectionState::Error);
+        // A subsequent authenticated positive can settle only its exact old
+        // ledger obligation; the already retired counter must not settle twice.
+        w.drainHeld(QByteArrayLiteral("{\"reconciled\":true}")); QTest::qWait(50);
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        QVERIFY(!w.runtime->cleanupPending()); QVERIFY(!w.runtime->busy()); QCOMPARE(w.records(),0);
+    }
+    void cancelledPersistedStartedRecordCanRetryAfterPreflightTimeout() {
+        World w; w.seed();
+        mayak::attempts::MayakAttemptStore store(&w.settings);
+        const auto identity=store.load().records.first().identity();
+        QVERIFY(store.markMayHaveStarted(identity).ok);
+        w.holdReconcileForever=true; w.runtime->begin(w.id); QTRY_COMPARE(w.reconciles,1);
+        w.runtime->cancel(); QTest::qWait(2700);
+        QVERIFY(w.runtime->cleanupPending()); QCOMPARE(w.records(),1);
+        w.holdReconcileForever=false; w.runtime->retryCleanup();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),2000); QCOMPARE(w.records(),0);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        w.drainHeld(QByteArrayLiteral("{\"reconciled\":true}")); QTest::qWait(50);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled")); QCOMPARE(w.acquires,0); QCOMPARE(w.starts,0);
+    }
+    void oldPreflightPositiveCannotReopenAfterNewRetryNegative() {
+        World w; w.seed(); w.holdReconcileForever=true;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.reconciles,1);
+        w.runtime->cancel(); QTest::qWait(2700); w.runtime->retryCleanup();
+        QTRY_COMPARE(w.reconciles,2); QCOMPARE(w.heldTransportPromises.size(),2);
+        const auto old=w.heldTransportPromises.at(0), current=w.heldTransportPromises.at(1);
+        old->addResult({ErrorCode::NoError,QByteArrayLiteral("{\"reconciled\":true}"),true}); old->finish();
+        QTRY_COMPARE(w.records(),0);
+        current->addResult({ErrorCode::NoError,QByteArrayLiteral("{\"reconciled\":false}"),true}); current->finish();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),2000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        QVERIFY(!w.runtime->cleanupPending()); QCOMPARE(w.acquires,0); QCOMPARE(w.starts,0);
+    }
+    void oldPreflightPositiveCannotResumeOrOverwriteNewCycle() {
+        World w; w.seed(); w.holdReconcileForever=true;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.reconciles,1);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,3000);
+        w.holdReconcileForever=false; w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        const auto ticket=w.current;
+        w.drainHeld(QByteArrayLiteral("{\"reconciled\":true}")); QTest::qWait(100);
+        QCOMPARE(w.state,Vpn::ConnectionState::Connected); QVERIFY(w.current.same(ticket)); QCOMPARE(w.records(),1);
+        w.runtime->cancel(); QTRY_COMPARE(w.records(),0);
+    }
+    void cancelDuringInitialInspectionRequiresPositiveOff() {
+        World w; w.holdInspection=true; w.runtime->begin(w.id);
+        QTRY_VERIFY(bool(w.heldInspection)); w.runtime->cancel();
+        QVERIFY(w.state!=Vpn::ConnectionState::Disconnected); QVERIFY(w.runtime->cleanupPending());
+        w.runtime->begin(w.id); QCOMPARE(w.starts,0);
+        w.heldInspection({B::OwnState::Off,w.inspectionNonce,{},{}});
+        QTRY_VERIFY(!w.runtime->cleanupPending()); QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.starts,0); QCOMPARE(w.acquires,0); QVERIFY(w.permissionRequestId.isEmpty());
+    }
+    void cancelDuringRecoveryRequiresExactDown() {
+        World w; w.activeInspection=true; w.holdNextStop=true; w.runtime->begin(w.id);
+        QTRY_VERIFY(bool(w.heldStopDone)); w.runtime->cancel();
+        QVERIFY(w.state!=Vpn::ConnectionState::Disconnected); QVERIFY(w.runtime->cleanupPending());
+        const auto ticket=w.current;
+        B::Ticket wrong{ticket.opaqueAttempt,std::make_shared<B::StartGate>()};
+        w.heldStopDone({wrong,B::Outcome::ConfirmedDown,{},w.heldStopNonce}); QTest::qWait(50);
+        QVERIFY(w.runtime->cleanupPending()); QVERIFY(w.state!=Vpn::ConnectionState::Disconnected);
+        w.backendRunning=false; w.heldStopDone({ticket,B::Outcome::ConfirmedDown,{},w.heldStopNonce});
+        QTRY_VERIFY(!w.runtime->cleanupPending()); QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.acquires,0); QCOMPARE(w.starts,0);
+    }
+    void lateReleasePositiveAfterBothDeadlinesCompletesConsistently() {
+        World w; w.releaseDelay=3500;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.state,Vpn::ConnectionState::Connected);
+        w.runtime->cancel(); QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),3000);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("failed"));
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->cleanupPending(),2000);
+        QCOMPARE(w.records(),0); QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled")); QVERIFY(!w.runtime->busy());
+    }
+    void neverStartedLateLeaseReconcileCanCompleteOffAndNewOn() {
+        World w; w.acquireDelay=300; w.holdReleaseForever=true;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.acquires,1); w.runtime->cancel();
+        QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),3500); QCOMPARE(w.starts,0); QCOMPARE(w.records(),1);
+        w.holdReleaseForever=false; w.runtime->retryCleanup();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),2000); QCOMPARE(w.records(),0);
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected); QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        w.runtime->begin(w.id); QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        w.drainHeld(QByteArrayLiteral("{\"released\":true}")); QTest::qWait(50);
+        QCOMPARE(w.state,Vpn::ConnectionState::Connected); QCOMPARE(w.records(),1);
+        w.runtime->cancel(); QTRY_COMPARE(w.records(),0);
+    }
+    void multiRecordCleanupHasOneTenSecondBudget() {
+        World w; w.failRelease=true;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.state,Vpn::ConnectionState::Connected);
+        w.runtime->cancel(); QTRY_VERIFY(w.runtime->cleanupPending());
+        w.seed(6); QCOMPARE(w.records(),7); w.reconcileDelay=2250;
+        QElapsedTimer elapsed; elapsed.start(); qint64 budgetTerminalAt=-1;
+        connect(w.runtime.get(),&MayakAutoConnectRuntime::stateChanged,&w,[&](Vpn::ConnectionState state,const QString&) {
+            // The coordinator may separately finish its original 3s stop
+            // deadline. Observe this cleanup attempt's common deadline only.
+            if (state==Vpn::ConnectionState::Error && elapsed.elapsed()>=9000 && budgetTerminalAt<0)
+                budgetTerminalAt=elapsed.elapsed();
+        });
+        w.runtime->retryCleanup();
+        QTRY_COMPARE_WITH_TIMEOUT(w.reconciles,5,10500);
+        QTest::qWait(2600); // last positive arrives at 11.25s, after the shared deadline
+        QVERIFY(elapsed.elapsed()<12500); QCOMPARE(w.reconciles,5);
+        qInfo() << "cleanup_budget_terminal_ms=" << budgetTerminalAt;
+        QVERIFY2(budgetTerminalAt>=9700 && budgetTerminalAt<=10400,qPrintable(QString::number(budgetTerminalAt)));
+        QVERIFY(w.runtime->cleanupPending()); QCOMPARE(w.records(),2);
+        QCOMPARE(w.acquires,1); QCOMPARE(w.starts,1);
+        w.reconcileDelay=0; w.runtime->retryCleanup();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),2000); QCOMPARE(w.records(),0);
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+        QTest::qWait(50);
+        QCOMPARE(w.records(),0); QVERIFY(!w.runtime->busy());
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
+    }
+    void synchronousCleanupSettlesWithoutCounterUnderflow() {
+        World w; w.synchronousCleanup=true;
+        w.runtime->begin(w.id); QTRY_COMPARE(w.state,Vpn::ConnectionState::Connected);
+        w.runtime->cancel(); QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),3000); QCOMPARE(w.records(),0);
+        w.runtime->begin(w.id); QTRY_COMPARE(w.state,Vpn::ConnectionState::Connected);
+        w.runtime->cancel(); QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),3000); QCOMPARE(w.records(),0);
+    }
+    void tenSequentialFixtureConnectOffCyclesDrainLedger() {
+        World w;
+        for (int cycle=0; cycle<10; ++cycle) {
+            w.runtime->begin(w.id);
+            QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+            QCOMPARE(w.records(),1);
+            w.failRelease=(cycle%3==1);
+            for (int press=0;press<10;++press) w.runtime->cancel();
+            if (w.failRelease) {
+                QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),1500);
+                QCOMPARE(w.records(),1);
+                w.failRelease=false;
+                for (int press=0;press<10;++press) w.runtime->retryCleanup();
+            }
+            QTRY_VERIFY_WITH_TIMEOUT(w.runtime->connectionPhase()==QStringLiteral("cancelled"),3000);
+            QVERIFY(!w.runtime->busy()); QCOMPARE(w.records(),0);
+        }
+        QCOMPARE(w.acquires,10); QCOMPARE(w.starts,10); QCOMPARE(w.releases,10);
+        QCOMPARE(w.stops,10); QCOMPARE(w.reconciles,3);
+    }
+    void neverFinishingReconcileSettlesAndManualRetryCompletes() {
+        World w; w.failRelease=true;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,4000);
+        w.runtime->cancel();
+        QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),1500);
+        w.failRelease=false; w.holdReconcileForever=true;
+        w.runtime->retryCleanup();
+        QTRY_COMPARE_WITH_TIMEOUT(w.reconciles,1,500);
+        QTest::qWait(2700); // The phase was already failed from release; wait past this reconcile's own deadline.
+        QCOMPARE(w.records(),1); QVERIFY(w.runtime->cleanupPending());
+        w.holdReconcileForever=false;
+        w.runtime->retryCleanup();
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->cleanupPending(),2500);
+        QCOMPARE(w.reconciles,2); QCOMPARE(w.records(),0);
+        QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
+        for (const auto& promise:w.heldTransportPromises) {
+            promise->addResult({ErrorCode::NoError,QByteArrayLiteral("{\"reconciled\":false}"),true});
+            promise->finish();
+        }
+        QCoreApplication::processEvents();
+        QCOMPARE(w.runtime->connectionPhase(),QStringLiteral("cancelled"));
     }
     void directBeginCannotReplacePendingCleanup() {
         World w; w.failRelease=true;
@@ -643,15 +1022,11 @@ private slots:
         w.runtime->cancel();
         QTRY_VERIFY_WITH_TIMEOUT(w.runtime->cleanupPending(),3500);
         QCOMPARE(w.releases,1);
-        w.runtime->retryCleanup();
-        QTest::qWait(150);
-        QCOMPARE(w.reconciles,0);
-        QTest::qWait(2600);
-        QVERIFY(w.runtime->cleanupPending()); QCOMPARE(w.reconciles,0);
-        w.failRelease=false; w.releaseDelay=0;
+        w.failRelease=false;
         w.runtime->retryCleanup();
         QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->cleanupPending(),2000);
         QCOMPARE(w.reconciles,1); QCOMPARE(w.records(),0);
+        QTest::qWait(2600); // Original release arrives after its operation token was retired.
         QTest::qWait(100);
         QVERIFY(!w.runtime->cleanupPending()); QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
     }

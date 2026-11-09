@@ -65,6 +65,9 @@ QString ConnectionController::managedMessage() const { return m_managedActive &&
 QString ConnectionController::managedConnectionPhase() const {
     return m_managedActive && m_mayak ? m_mayak->connectionPhase() : QStringLiteral("idle");
 }
+QVariantMap ConnectionController::managedExitLocation() const {
+    return m_managedActive && m_mayak ? m_mayak->exitLocation() : QVariantMap{};
+}
 bool ConnectionController::managedCleanupPending() const { return m_managedActive && m_mayak && m_mayak->cleanupPending(); }
 void ConnectionController::retryManagedCleanup() { if (managedCleanupPending()) m_mayak->retryCleanup(); }
 bool ConnectionController::canInstallUpdate() const {

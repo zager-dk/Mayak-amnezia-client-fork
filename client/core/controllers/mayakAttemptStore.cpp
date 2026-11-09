@@ -214,6 +214,14 @@ LoadResult MayakAttemptStore::load() const
 {
     if (!onOwnerThread()) return failed(Error::WrongThread);
     if (m_settings == nullptr) return failed(Error::StorageUnavailable);
+    // A failed QSettings sync may already have changed its in-memory value.
+    // Keep the exact intended encrypted ledger locally and require a successful
+    // sync before treating any subsequent read as authoritative.
+    if (!m_uncertainCommit.isEmpty()) {
+        if (!m_settings->setEncryptedValueAndSync(QString::fromLatin1(ledgerKey), m_uncertainCommit))
+            return failed(Error::StorageUnavailable);
+        m_uncertainCommit.clear();
+    }
     const auto state = m_settings->storedValueClass(QString::fromLatin1(ledgerKey));
     if (state == SecureQSettings::StoredValueClass::Missing) return {true, Error::None, {}};
     if (state != SecureQSettings::StoredValueClass::Encrypted) return failed(Error::Corrupt);
@@ -294,11 +302,9 @@ MutationResult MayakAttemptStore::mutate(Mutation operation, const AttemptIdenti
     } else if (operation == Mutation::Remove) {
         if (matchIndex < 0) return {true, Error::None, current.records};
         for (int i = 0; i < current.records.size(); ++i) if (i != matchIndex) updated.append(current.records.at(i));
-        if (updated.isEmpty()) {
-            if (m_settings == nullptr || !m_settings->removeAndSync(QString::fromLatin1(ledgerKey)))
-                return {false, Error::StorageUnavailable, {}};
-            return {true, Error::None, {}};
-        }
+        // Keep an encrypted, synchronously committed empty ledger. QSettings
+        // removal can fail after mutating its in-memory view, making Missing
+        // indistinguishable from a durable deletion in this process.
     } else {
         if (matchIndex < 0) return {false, Error::Conflict, {}};
         const AttemptRecord &old = current.records.at(matchIndex);
@@ -325,8 +331,11 @@ MutationResult MayakAttemptStore::mutate(Mutation operation, const AttemptIdenti
     }
     const QByteArray encoded = encodeLedger(updated);
     if (encoded.isEmpty() || encoded.size() > maxLedgerBytes) return {false, Error::Full, {}};
-    if (m_settings == nullptr || !m_settings->setEncryptedValueAndSync(QString::fromLatin1(ledgerKey), encoded))
+    if (m_settings == nullptr) return {false, Error::StorageUnavailable, {}};
+    if (!m_settings->setEncryptedValueAndSync(QString::fromLatin1(ledgerKey), encoded)) {
+        m_uncertainCommit = encoded;
         return {false, Error::StorageUnavailable, {}};
+    }
     return {true, Error::None, updated};
 }
 

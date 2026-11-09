@@ -1,15 +1,32 @@
-MayakVPN 5.1.0.14 source candidate provenance
-Base: accepted local 5.1.0.13 source ZIP SHA-256 f05543047c67cff1f7ab5734a1778c9e8362378ad0f10fa1536e5d50346d5684
-Accepted 68-file visual baseline manifest SHA-256: 8522c8e8d557788c3b6586141a42a061f27a7eeec06a671804d5d9cf27c07b57
-Accepted source manifest SHA-256: d5b9b3efe70e4cdf11e43a0ed919bd1b36eb8d853b2c2322f083bc08eff9d06e
-Overlay: exactly the seven updater/UI source paths from client/core/controllers/updateController.cpp, client/core/controllers/updateController.h, client/tests/api/testUpdateController.cpp, client/ui/controllers/updateUiController.cpp, client/ui/controllers/updateUiController.h, client/ui/qml/Components/MayakUpdatePrompt.qml, docs/UPDATES.md; each exact current hash is required in the accepted manifest. No new files or mutable-tree scan.
-Build version override: AMNEZIAVPN_VERSION=5.1.0.14; Android versionCode=2194 (base 2191 + APP_ANDROID_VERSION_CODE_OFFSET=3).
-No Windows/Android binary was built or signed by this source archive preparation.
+MayakVPN 5.1.0.15 source candidate provenance
+Base: accepted local 5.1.0.14 source ZIP SHA-256 c441a6170a0850de41f530a9fa74191c3fcfa9949b3d9069ec0674082ce06e8d
+Accepted14 75-file source manifest SHA-256: d5b9b3efe70e4cdf11e43a0ed919bd1b36eb8d853b2c2322f083bc08eff9d06e
+Accepted15 BUILD_ONLY manifest SHA-256: cd420be60e82493396297efbb4a3f10b31b07161cfefe0611d2d80346846a9f2
+Accepted baseline source paths: 75; exact new product paths: 11; explicit changed baseline paths: 10.
+Only these baseline product paths changed: client/core/controllers/connectionController.cpp, client/core/controllers/connectionController.h, client/core/controllers/mayakAutoConnectRuntime.cpp, client/core/controllers/mayakAutoConnectRuntime.h, client/tests/api/testMayakRuntime.cpp, client/ui/controllers/connectionUiController.cpp, client/ui/controllers/connectionUiController.h, client/ui/qml/Components/ConnectButton.qml, client/ui/qml/Pages2/PageHome.qml, client/ui/qml/qml.qrc
+New product paths: client/core/controllers/api/mayakAdmissionClient.cpp, client/core/controllers/api/mayakAdmissionClient.h, client/core/controllers/mayakAttemptStore.cpp, client/core/controllers/mayakAttemptStore.h, client/ui/qml/MayakCity/MayakCity.js, client/ui/qml/MayakCity/MayakCityScene.qml, client/ui/qml/MayakCity/amsterdam.jpg, client/ui/qml/MayakCity/frankfurt.jpg, client/ui/qml/MayakCity/helsinki.jpg, client/ui/qml/MayakCity/oslo.jpg, client/ui/qml/MayakCity/stockholm.jpg
+Independent final reviews bound in accepted15 manifest: C2, A-FIX S06, and C3.
+Build version override: AMNEZIAVPN_VERSION=5.1.0.15; Android code=2195 (base 2191 + APP_ANDROID_VERSION_CODE_OFFSET=4).
+No Windows/Android binary was built or signed by this source candidate preparation.
 Approved source path SHA-256 values:
-  client/core/controllers/updateController.cpp: ab3b30f8d08dbbf3ce80faf26704c55c6cdd6453b1acabf3796aade598f0a403
-  client/core/controllers/updateController.h: e55992feca8f489b50ab67dbbaa8f2d6bd6344f540144356accfa3dd45409d31
-  client/tests/api/testUpdateController.cpp: 436ccaa8d8ff138632e2cf1806ec16292b9b93d593545d4722a252436c53522f
-  client/ui/controllers/updateUiController.cpp: 10d1be8bf593cfa4e9c85efe31d54021e182daa09447bae4062bcd1a369b45b0
-  client/ui/controllers/updateUiController.h: eb98a3d329ed901a8394b37ac1c629cfbfd37b43f66621fee8b3da68fd91c874
-  client/ui/qml/Components/MayakUpdatePrompt.qml: 3514d6c0a155a9f4418f58016ec4fe75988ad0e9e111ae8f14b5691749be764b
-  docs/UPDATES.md: e5018fb85abcf01d8e0a9547dfadda5bd278818330a6e83c3ea9e15485c13f8d
+  client/core/controllers/api/mayakAdmissionClient.cpp: 568cc8f95f5c5900f6fa2d63955801aad4adf38fb939243ef00303de45810f8b
+  client/core/controllers/api/mayakAdmissionClient.h: d2dd15c6c88d6cb2505f61500fc5293e30c0642834ad2713fc6622246e27b61c
+  client/core/controllers/connectionController.cpp: 06a6e6c5dfc436c2b56ee5f58570e295fc70ad952c0130b825715ce7ddb5e3e1
+  client/core/controllers/connectionController.h: 277010b4a0b1c36bc47c7cbd2fdc0b5a328d1e049dc7d38d10c43258516d8c38
+  client/core/controllers/mayakAttemptStore.cpp: 0030018c2278eeebee00b471ce868b13b574057ae3a54a6e89333620eddfe5aa
+  client/core/controllers/mayakAttemptStore.h: 549347cdeb3f94acbac03292a10430a8679695562774fb84ac5bdaa1b41ed135
+  client/core/controllers/mayakAutoConnectRuntime.cpp: e62bea4efbb041709e750f3a9f49f07ddc800a225f0e6f72b1189fe6ac207dca
+  client/core/controllers/mayakAutoConnectRuntime.h: e43534e8f69eb32731d9214234d1f08dc017f28977aa41965d52d6bccf7982ed
+  client/tests/api/testMayakRuntime.cpp: d7f9a4edd83455ed2ba71bcc4dc2db97288cf3157521638f98a55ea1089d7b68
+  client/ui/controllers/connectionUiController.cpp: 19fc65ef4124e5202ddbf26d10dcd6e906b275ecabd0303b19510052b6c61cf3
+  client/ui/controllers/connectionUiController.h: 0c464009c27ecb4bfc9a28d7d5d790388522dd5ce38663835c319596fc4a0628
+  client/ui/qml/Components/ConnectButton.qml: e4b92b6505cee4c4c481dbc63e0d77ab87dbfd4de971b717e012c59233376624
+  client/ui/qml/MayakCity/MayakCity.js: 2dbf770d66766c3f8015a41a13d3ad93b769eb92a8c7d99e5c8be3e0887e60d1
+  client/ui/qml/MayakCity/MayakCityScene.qml: a401d997770a1557a8202b66e2210e4e000a08d437be097e232bcb8593f98655
+  client/ui/qml/MayakCity/amsterdam.jpg: f88dc1e0464ed45974fb772fb467e046c949e4fed65ed248094c5df1b68ec349
+  client/ui/qml/MayakCity/frankfurt.jpg: a438f1237e334d7bd591e7b6dc18da2420a719c91a70bd86aa6e6bdc585fc3c9
+  client/ui/qml/MayakCity/helsinki.jpg: 088a2ae94e14c8ed96796473f92df24ae5830144212e2ffcbbe3fc657b1078b5
+  client/ui/qml/MayakCity/oslo.jpg: 1b84a66249df284f715a90e61af41796f0d4c4219b5d46407a4fdff3312bde32
+  client/ui/qml/MayakCity/stockholm.jpg: fdbfc1db83ac171cb852cc238ca3384195ad64d374904d0526fb4dce1fb075a3
+  client/ui/qml/Pages2/PageHome.qml: 1b38a2d9b18f1b1689e0ab39b4e3f4c410eae8f7a0cfaf6448f3e6a4056fd8f8
+  client/ui/qml/qml.qrc: ae1d52198724bb0277eefc8497804448a7f6ce6910a0a7a0f7e0709a3de9f9bd

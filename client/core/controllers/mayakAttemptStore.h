@@ -2,6 +2,7 @@
 #define MAYAKATTEMPTSTORE_H
 
 #include <QList>
+#include <QByteArray>
 #include <QObject>
 #include <QString>
 
@@ -105,6 +106,7 @@ private:
     bool onOwnerThread() const;
 
     SecureQSettings *m_settings = nullptr;
+    mutable QByteArray m_uncertainCommit;
 };
 
 } // namespace mayak::attempts

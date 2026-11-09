@@ -4,6 +4,7 @@
 #include <QObject>
 #include <QJsonObject>
 #include <QPair>
+#include <QVariantMap>
 #include <memory>
 
 #include "core/utils/containerEnum.h"
@@ -69,6 +70,7 @@ public:
     bool isMayakActive() const { return m_managedActive; }
     QString managedMessage() const;
     QString managedConnectionPhase() const;
+    QVariantMap managedExitLocation() const;
     bool managedCleanupPending() const;
     void retryManagedCleanup();
     bool canInstallUpdate() const;

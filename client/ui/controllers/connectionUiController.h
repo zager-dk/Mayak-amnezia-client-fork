@@ -2,6 +2,7 @@
 #define CONNECTIONUICONTROLLER_H
 
 #include <QObject>
+#include <QVariantMap>
 
 #include "core/controllers/connectionController.h"
 #include "core/utils/errorCodes.h"
@@ -20,6 +21,7 @@ public:
     Q_PROPERTY(QString connectionStateText READ connectionStateText NOTIFY connectionStateChanged)
     Q_PROPERTY(QString connectionPhase READ connectionPhase NOTIFY connectionStateChanged)
     Q_PROPERTY(bool cleanupPending READ cleanupPending NOTIFY connectionStateChanged)
+    Q_PROPERTY(QVariantMap exitLocation READ exitLocation NOTIFY connectionStateChanged)
 
     explicit ConnectionUiController(ConnectionController* connectionController,
                                     ServersController* serversController,
@@ -32,6 +34,7 @@ public:
     QString connectionStateText() const;
     QString connectionPhase() const;
     bool cleanupPending() const;
+    QVariantMap exitLocation() const;
 
 public slots:
     void toggleConnection();

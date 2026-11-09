@@ -10,6 +10,13 @@
         <file>Components/UpdateSupportDrawer.qml</file>
         <file>Components/PromoBanner.qml</file>
         <file>Components/ConnectButton.qml</file>
+        <file>MayakCity/MayakCity.js</file>
+        <file>MayakCity/MayakCityScene.qml</file>
+        <file>MayakCity/oslo.jpg</file>
+        <file>MayakCity/helsinki.jpg</file>
+        <file>MayakCity/amsterdam.jpg</file>
+        <file>MayakCity/frankfurt.jpg</file>
+        <file>MayakCity/stockholm.jpg</file>
         <file>newComponents/Mayak/qmldir</file>
         <file>newComponents/Mayak/MayakBeacon.qml</file>
         <file>newComponents/Mayak/assets/f7-layer-sky.svg</file>

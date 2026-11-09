@@ -44,6 +44,10 @@ struct AcquireResponse {
     QDateTime connectBefore;
     qint64 configRevision = 0;
     QString encodedConfig;
+    // Optional display-only metadata. Empty values mean unknown and never
+    // affect validation of the VPN allocation/configuration above.
+    QString exitLocationCandidateId;
+    QString exitLocationCityId;
 };
 
 struct Response {
