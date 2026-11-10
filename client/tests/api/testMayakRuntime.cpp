@@ -12,6 +12,7 @@
 #include <QUuid>
 #include "core/utils/mayakTunnelProbe.h"
 #include "core/controllers/mayakAutoConnectRuntime.h"
+#include "core/controllers/mayakAutoConnectCoordinator.h"
 #include "core/controllers/mayakAttemptStore.h"
 #include "core/controllers/connectionController.h"
 #include "core/controllers/api/subscriptionController.h"
@@ -86,6 +87,15 @@ struct World : QObject {
     std::function<void(bool)> observeVisibility;
     std::function<void(B::Ticket)> observeFailover;
     bool silentFirst=false, singleCandidate=false;
+    // Xray paths (5.1.0.21): acquire offers them when asked; the fixture backend runs either path.
+    bool offerXray=false, awgSilent=false, xrayDead=false;
+    int awgStarts=0, xrayStarts=0;
+    QStringList startedProtocols;
+    QJsonObject lastXrayConfig;
+    // Race engine fixture: started engines get loopback SOCKS entries nobody serves.
+    bool withRace=false, raceEngineOk=true;
+    int raceStarts=0, raceStops=0; bool raceRunning=false;
+    QJsonObject raceConfig;
     int localFailStarts=0; // Windows: the next N starts never bring the tunnel interface up (no health)
     // Windows: the service is still busy failing the adapter, so the first stop of such an
     // attempt is not confirmed in time (a later stop is).
@@ -126,8 +136,19 @@ struct World : QObject {
         port.cancelPermissionPreparation=[this](QString requestId) {
             if (requestId==permissionRequestId) heldPermissionDone={};
         };
-        port.start=[this](B::Ticket ticket,QString,QJsonObject,qint64,B::Done done) {
+        port.start=[this](B::Ticket ticket,QString,QJsonObject config,qint64,B::Done done) {
             ++starts; events<<"start"; current=ticket;
+            const QString protocol=config.value("protocol").toString();
+            startedProtocols<<protocol;
+            if (protocol=="xray") {
+                ++xrayStarts; lastXrayConfig=config; ticket.gate->commit(); backendRunning=true;
+                AwgHealthContext expected{"xray:"+ticket.opaqueAttempt,"78726179",selectedHost+":443"};
+                done({ticket,B::Outcome::Started,expected});
+                health={expected.id,1,expected.peerPublicKey,expected.endpoint,"10.33.0.2/32","MayakXrayFixture",0,10,10,!xrayDead};
+                QTimer::singleShot(10,this,[this,ticket] {if(observeHealth)observeHealth(ticket,health);});
+                return;
+            }
+            ++awgStarts;
             if(holdStart) { startDone=done; return; }
             ticket.gate->commit(); backendRunning=true;
             AwgHealthContext expected{guid(),QString(64,'a'),selectedHost+":49963"};
@@ -135,7 +156,7 @@ struct World : QObject {
             // localFailStarts: started, but the tunnel interface never comes up (no health at all).
             if (localFailStarts>0) { --localFailStarts; events<<"local_fail"; localFailTickets.insert(ticket.opaqueAttempt); return; }
             // silentFirst: the first exit never answers a handshake (no valid health ever).
-            const bool silent=silentFirst && selectedHost=="81.29.149.103";
+            const bool silent=(silentFirst && selectedHost=="81.29.149.103") || awgSilent;
             health={expected.id,1,expected.peerPublicKey,expected.endpoint,"10.8.0.2","MayakFixture",quint64(QDateTime::currentMSecsSinceEpoch()),10,10,!silent};
             QTimer::singleShot(10,this,[this,ticket] {if(observeHealth)observeHealth(ticket,health);});
         };
@@ -158,6 +179,15 @@ struct World : QObject {
             if (!tunnelDown) health.rxTotal+=500; // a live tunnel still carries RX on a random probe miss
             health.txTotal+=500;
             QTimer::singleShot(10,this,[this,ticket] {if(observeHealth)observeHealth(ticket,health);});
+        };
+        port.raceStart=[this](QString,QJsonObject config,qint64,std::function<void(bool)> done) {
+            if (!withRace) { done(false); return; }
+            ++raceStarts; events<<"race_start"; raceConfig=config;
+            if (backendRunning) { done(false); return; } // never with a tunnel up
+            raceRunning=raceEngineOk; done(raceEngineOk);
+        };
+        port.raceStop=[this](QString,qint64,std::function<void(bool)> done) {
+            ++raceStops; events<<"race_stop"; raceRunning=false; done(true);
         };
         port.observeResume=[this](QObject*,std::function<void(B::Ticket,bool,bool)> resumed){observeResume=resumed;};
         port.observeUserStop=[this](QObject*,std::function<void(B::Ticket)> stopped){observeUserStop=stopped;};
@@ -240,6 +270,27 @@ struct World : QObject {
                         {configKey::dns1,"1.1.1.1"},{configKey::dns2,"1.0.0.1"}};
         return "vpn://"+QString::fromUtf8(qCompress(QJsonDocument(cfg).toJson(QJsonDocument::Compact)).toBase64(QByteArray::Base64UrlEncoding|QByteArray::OmitTrailingEquals));
     }
+    QJsonObject xrayPaths() {
+        QJsonArray paths;
+        for (const QString fp : {QStringLiteral("firefox"),QStringLiteral("safari"),QStringLiteral("chrome")}) {
+            const QJsonObject stream{{"network","xhttp"},{"security","reality"},
+                {"realitySettings",QJsonObject{{"fingerprint",fp},{"serverName","example.org"},{"publicKey","pk"},{"shortId","ab"}}},
+                {"xhttpSettings",QJsonObject{{"host","example.org"},{"path","/p"},{"mode","auto"}}}};
+            const QJsonObject client{{"inbounds",QJsonArray{QJsonObject{{"listen","127.0.0.1"},{"port",10808},{"protocol","socks"},{"settings",QJsonObject{{"udp",true}}}}}},
+                {"outbounds",QJsonArray{QJsonObject{{"protocol","vless"},
+                    {"settings",QJsonObject{{"vnext",QJsonArray{QJsonObject{{"address",selectedHost},{"port",443},
+                        {"users",QJsonArray{QJsonObject{{"id",guid()},{"encryption","none"}}}}}}}}},
+                    {"streamSettings",stream}}}}};
+            const QJsonObject xray{{"port","443"},{"transport_proto","tcp"},{"xray_fingerprint",fp},{"xray_security","reality"},
+                {"xray_sni","example.org"},{"xray_transport","xhttp"},
+                {"last_config",QString::fromUtf8(QJsonDocument(client).toJson(QJsonDocument::Compact))}};
+            const QJsonObject root{{"config_version",2},{"name","Mayak test"},{"hostName",selectedHost},{"defaultContainer","amnezia-xray"},
+                {"containers",QJsonArray{QJsonObject{{"container","amnezia-xray"},{"xray",xray}}}},{"dns1","1.1.1.1"},{"dns2","1.0.0.1"}};
+            paths.append(QJsonObject{{"id","xray-"+fp},{"fingerprint",fp},{"config","vpn://"+QString::fromUtf8(
+                qCompress(QJsonDocument(root).toJson(QJsonDocument::Compact)).toBase64(QByteArray::Base64UrlEncoding|QByteArray::OmitTrailingEquals))}});
+        }
+        return {{"schema",1},{"paths",paths}};
+    }
     int failConfigCount=0; // gateway unreachable (DNS/timeout) for the next N config fetches
     QFuture<GatewayPostResult> transport(QString path,QJsonObject payload) {
         requestPayloads.append(payload);
@@ -270,6 +321,8 @@ struct World : QObject {
                 if(fullFirst && acquires==1) response={{"http_status",409},{"code","FULL"},{"message","full"}};
                 else { response={{"allocation_id",allocation},{"connect_before",QDateTime::currentDateTimeUtc().addSecs(30).toString(Qt::ISODateWithMs)},
                     {"config_revision",14},{"config",config()}}; trusted=!lostAcquire; }
+                if (!response.contains("http_status") && offerXray && payload.value("mayak_paths").toInt()==1)
+                    response.insert("xray_paths",xrayPaths());
                 if (!response.contains("http_status") && payload.value("mayak_exit_location").toInt()==1
                     && exitLocationMode!=1) {
                     const QString candidate=payload.value("candidate_id").toString();
@@ -1863,6 +1916,133 @@ private slots:
         QCOMPARE(w.state,Vpn::ConnectionState::Disconnected);
         QCOMPARE(w.recovers,0); QCOMPARE(w.starts,starts); QCOMPARE(w.acquires,acquires);
         QVERIFY(!w.runtime->busy());
+    }
+
+    // ---------- 5.1.0.21 «4 пути» ----------
+    void xrayPathConnectsOnTheSameAllocationWhenAwgIsSilent() {
+        FastRecoveryTiming timing;
+        auto& t=mayak::autoconnect::Coordinator::timing(); const auto saved=t; t.awgVerifyMs=400;
+        World w; w.singleCandidate=true; w.offerXray=true; w.awgSilent=true;
+        w.app.setMayakConnectionMethod("auto");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.runtime->exitLocation().value("pathId").toString(),QStringLiteral("xray-firefox"));
+        QCOMPARE(w.awgStarts,1); QCOMPARE(w.xrayStarts,1);
+        // Rule 5: the started Xray client never logs destinations.
+        {
+            const auto client=QJsonDocument::fromJson(w.lastXrayConfig.value("xray_config_data").toObject()
+                .value("config").toString().toUtf8()).object();
+            QCOMPARE(client.value("log").toObject().value("access").toString(),QStringLiteral("none"));
+            QCOMPARE(client.value("log").toObject().value("dnsLog").toBool(true),false);
+        }
+        QCOMPARE(w.acquires,1);           // one place on the exit for every path
+        QCOMPARE(w.releases,0);           // switching paths never releases it
+        int acquireWithPaths=0, proven=0;
+        for (const auto& p:w.requestPayloads) {
+            if (p.value("action").toString()=="acquire" && p.value("mayak_paths").isDouble() && p.value("mayak_paths").toInt()==1) ++acquireWithPaths;
+            if (p.value("action").toString()=="proven") ++proven;
+        }
+        QCOMPARE(acquireWithPaths,1); QCOMPARE(proven,1);
+        settle(w);
+        QCOMPARE(w.releases,1);
+        // Path memory: this network now starts with Xray (AWG stays the fallback).
+        w.startedProtocols.clear();
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.startedProtocols.value(0),QStringLiteral("xray"));
+        settle(w);
+        t=saved;
+    }
+    void onlyAwgNeverStartsXray() {
+        FastRecoveryTiming timing;
+        auto& t=mayak::autoconnect::Coordinator::timing(); const auto saved=t; t.awgVerifyMs=400;
+        World w; w.singleCandidate=true; w.offerXray=true; w.awgSilent=true;
+        w.app.setMayakConnectionMethod("awg");
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(w.state==Vpn::ConnectionState::Error || w.runtime->message().contains(QStringLiteral("повторяем")),10000);
+        QCOMPARE(w.xrayStarts,0);
+        settle(w);
+        t=saved;
+    }
+    void onlyXrayNeverStartsAwg() {
+        FastRecoveryTiming timing;
+        World w; w.singleCandidate=true; w.offerXray=true;
+        w.app.setMayakConnectionMethod("xray");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(w.awgStarts,0); QCOMPARE(w.xrayStarts,1);
+        QCOMPARE(w.runtime->exitLocation().value("pathId").toString(),QStringLiteral("xray-firefox"));
+        settle(w);
+    }
+    void connectedXrayEndsOnlyAfterThreeFailedProbes() {
+        FastRecoveryTiming timing;
+        World w; w.singleCandidate=true; w.offerXray=true;
+        w.app.setMayakConnectionMethod("xray");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        const int starts=w.xrayStarts;
+        w.failNextProbes=2; // two misses in a row: the same tunnel stays
+        QTest::qWait(1500);
+        QCOMPARE(w.xrayStarts,starts);
+        w.tunnelDown=true;  // a dead path is ended and started again
+        QTRY_VERIFY_WITH_TIMEOUT(w.xrayStarts>starts,10000);
+        w.tunnelDown=false;
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,15000);
+        settle(w);
+    }
+    void onlyXrayWithoutPathsIsAClearError() {
+        FastRecoveryTiming timing;
+        World w; w.singleCandidate=true; w.offerXray=false;
+        w.app.setMayakConnectionMethod("xray");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,10000);
+        QVERIFY(w.runtime->message().contains(QStringLiteral("Способ подключения")) || w.runtime->message().contains(QStringLiteral("способ подключения")));
+        QCOMPARE(w.starts,0);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+    }
+    void deadXrayPathsFallBackToTheNextPathThenError() {
+        FastRecoveryTiming timing;
+        auto& t=mayak::autoconnect::Coordinator::timing(); const auto saved=t; t.xrayVerifyMs=300;
+        World w; w.singleCandidate=true; w.offerXray=true; w.xrayDead=true;
+        w.app.setMayakConnectionMethod("xray");
+        w.runtime->begin(w.id);
+        QTRY_VERIFY_WITH_TIMEOUT(w.xrayStarts>=3,10000);
+        QTRY_VERIFY_WITH_TIMEOUT(w.state!=Vpn::ConnectionState::Connecting,10000);
+        QVERIFY(w.state!=Vpn::ConnectionState::Connected);
+        QCOMPARE(w.acquires>=1,true);
+        settle(w);
+        t=saved;
+    }
+
+    void raceWithoutAnswersDropsXrayAndNeverOverlapsATunnel() {
+        FastRecoveryTiming timing;
+        World w; w.singleCandidate=true; w.offerXray=true; w.withRace=true;
+        w.app.setMayakConnectionMethod("xray");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,15000);
+        QCOMPARE(w.raceStarts,1); QCOMPARE(w.raceStops,1);
+        QCOMPARE(w.xrayStarts,0); // nobody answered through the race entries: no tunnel was started
+        // The engine config: one password-protected loopback entry and one outbound per path.
+        const auto inbounds=w.raceConfig.value("inbounds").toArray();
+        QCOMPARE(inbounds.size(),3);
+        for (const auto& v:inbounds) {
+            const auto in=v.toObject();
+            QCOMPARE(in.value("listen").toString(),QStringLiteral("127.0.0.1"));
+            QCOMPARE(in.value("settings").toObject().value("auth").toString(),QStringLiteral("password"));
+        }
+        QCOMPARE(w.raceConfig.value("outbounds").toArray().size(),3);
+        QCOMPARE(w.raceConfig.value("routing").toObject().value("rules").toArray().size(),3);
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+    }
+    void raceEngineFailureFallsBackToServerOrder() {
+        FastRecoveryTiming timing;
+        World w; w.singleCandidate=true; w.offerXray=true; w.withRace=true; w.raceEngineOk=false;
+        w.app.setMayakConnectionMethod("xray");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,15000);
+        QCOMPARE(w.runtime->exitLocation().value("pathId").toString(),QStringLiteral("xray-firefox"));
+        QVERIFY(!w.raceRunning);
+        settle(w);
     }
 
     void cancelDuringConnectRetryWaitDisconnects() {

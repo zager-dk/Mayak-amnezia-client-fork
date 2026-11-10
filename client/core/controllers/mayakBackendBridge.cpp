@@ -279,6 +279,44 @@ void MayakBackendBridge::recover(Ticket t, Millis deadline, Done done) {
     }, Qt::QueuedConnection);
 }
 
+bool MayakBackendBridge::canRace() const { return bool(m_state->port.raceStart) && bool(m_state->port.raceStop); }
+void MayakBackendBridge::raceStart(QString requestId, QJsonObject xrayConfig, Millis deadline, std::function<void(bool)> done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto s = m_state;
+    const QPointer<MayakBackendBridge> self(this);
+    auto call = std::make_shared<Call>();
+    auto finish = [self, call, done](bool ok) {
+        if (!self || call->finished) return;
+        call->finished = true;
+        if (done) done(ok);
+    };
+    if (!s->port.owner || !s->port.raceStart) { finish(false); return; }
+    QTimer::singleShot(delayTo(deadline), this, [finish] { finish(false); });
+    QMetaObject::invokeMethod(s->port.owner, [s, self, requestId, xrayConfig, deadline, finish] {
+        s->port.raceStart(requestId, xrayConfig, deadline, [self, finish](bool ok) {
+            if (self) QMetaObject::invokeMethod(self, [finish, ok] { finish(ok); }, Qt::QueuedConnection);
+        });
+    }, Qt::QueuedConnection);
+}
+void MayakBackendBridge::raceStop(QString requestId, Millis deadline, std::function<void(bool)> done) {
+    Q_ASSERT(QThread::currentThread() == thread());
+    const auto s = m_state;
+    const QPointer<MayakBackendBridge> self(this);
+    auto call = std::make_shared<Call>();
+    auto finish = [self, call, done](bool ok) {
+        if (!self || call->finished) return;
+        call->finished = true;
+        if (done) done(ok);
+    };
+    if (!s->port.owner || !s->port.raceStop) { finish(false); return; }
+    QTimer::singleShot(delayTo(deadline), this, [finish] { finish(false); });
+    QMetaObject::invokeMethod(s->port.owner, [s, self, requestId, deadline, finish] {
+        s->port.raceStop(requestId, deadline, [self, finish](bool ok) {
+            if (self) QMetaObject::invokeMethod(self, [finish, ok] { finish(ok); }, Qt::QueuedConnection);
+        });
+    }, Qt::QueuedConnection);
+}
+
 bool MayakBackendBridge::canAdopt() const { return bool(m_state->port.adopt); }
 void MayakBackendBridge::adopt(Ticket recovery, Ticket fresh, QString identity, QJsonObject config, Millis deadline, Done done) {
     Q_ASSERT(QThread::currentThread() == thread());

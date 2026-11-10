@@ -61,10 +61,12 @@ enum class VpnProto(
     protected abstract fun createProtocol(): Protocol
 
     /** Managed AWG ownership cannot reuse an instance whose callbacks retain a prior state sink. */
-    fun newManagedProtocol(): Wireguard = when (this) {
+    fun newManagedProtocol(): Protocol = when (this) {
         WIREGUARD -> Wireguard()
         AWG -> Awg()
-        else -> throw IllegalArgumentException("Managed lifecycle requires WireGuard or AmneziaWG")
+        // Mayak Xray path: the process-wide Xray engine; initialize() re-binds its state sink.
+        XRAY -> Xray.instance
+        else -> throw IllegalArgumentException("Managed lifecycle requires WireGuard, AmneziaWG or Xray")
     }
 
     companion object {

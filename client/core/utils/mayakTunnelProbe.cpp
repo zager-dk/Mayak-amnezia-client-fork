@@ -303,10 +303,13 @@ public:
     }
 
     void start() {
+        const bool socksOk = m_request.viaSocks() && m_request.pinnedEndpoints.isEmpty() &&
+            m_request.interfaceName.isEmpty() && !m_request.socksUser.isEmpty() && !m_request.socksPassword.isEmpty();
+        const bool interfaceOk = !m_request.viaSocks() && !m_request.interfaceName.isEmpty() &&
+            m_request.localAddress.protocol() == QAbstractSocket::IPv4Protocol;
         if (!m_request.attemptTag.isEmpty() && !m_request.nonce.isEmpty() && m_request.nonce.size() <= 128 &&
-            !m_request.interfaceName.isEmpty() && !m_request.expectedEgressIpv4.isEmpty() &&
-            m_request.deadlineMs >= 1 && m_request.deadlineMs <= 8000 &&
-            m_request.localAddress.protocol() == QAbstractSocket::IPv4Protocol) {
+            (socksOk || interfaceOk) && (!m_request.expectedEgressIpv4.isEmpty() || m_request.acceptAnyPublicEgress) &&
+            m_request.deadlineMs >= 1 && m_request.deadlineMs <= 8000) {
             for (const auto &ip : m_request.expectedEgressIpv4)
                 if (!validIpv4(ip)) { finish(false, {}, "invalid expected egress IPv4"); return; }
             for (const auto &e : m_request.pinnedEndpoints)
@@ -394,7 +397,11 @@ private:
         m_attemptRejected = false;
         m_responseCompleted = false;
         m_socket = new QSslSocket(this);
-        m_socket->setProxy(QNetworkProxy::NoProxy);
+        if (m_request.viaSocks()) {
+            // The race engine's own local entry; the host name is resolved behind the proxy.
+            m_socket->setProxy(QNetworkProxy(QNetworkProxy::Socks5Proxy, QStringLiteral("127.0.0.1"),
+                                             m_request.socksPort, m_request.socksUser, m_request.socksPassword));
+        } else m_socket->setProxy(QNetworkProxy::NoProxy);
         m_socket->setPeerVerifyMode(QSslSocket::VerifyPeer);
         auto *socket = m_socket.data();
         connect(socket, &QSslSocket::hostFound, this, [this, attempt] {
@@ -440,12 +447,20 @@ private:
             }
             QByteArray body; QString error; QString egress;
             m_parseOk = parseHttp(m_wire, &body, &error);
+            QStringList expectedEgress = m_request.expectedEgressIpv4;
+            if (m_parseOk && m_request.acceptAnyPublicEgress) {
+                const QString origin = QJsonDocument::fromJson(body).object().value(QStringLiteral("origin")).toString()
+                                           .section(QLatin1Char(','), 0, 0).trimmed();
+                const QHostAddress address(origin);
+                if (address.protocol() == QAbstractSocket::IPv4Protocol && !address.isPrivateUse() &&
+                    !address.isLoopback() && !address.isLinkLocal()) expectedEgress = {origin};
+            }
             m_nonceOk = false;
             m_egressOk = false;
             if (m_parseOk) {
                 m_nonceOk = responseNonceMatches(body, m_request.nonce, nullptr);
-                m_egressOk = responseEgressMatches(body, m_request.expectedEgressIpv4, &egress);
-                if (!MayakTunnelProbe::validateResponse(body, m_request.nonce, m_request.expectedEgressIpv4, &egress, &error)) {
+                m_egressOk = responseEgressMatches(body, expectedEgress, &egress);
+                if (!MayakTunnelProbe::validateResponse(body, m_request.nonce, expectedEgress, &egress, &error)) {
                     failAttempt(attempt, error); return;
                 }
             } else {
@@ -517,6 +532,17 @@ private:
             logStage(QStringLiteral("tls_alert_received"));
             if (level == QSsl::AlertLevel::Fatal) scheduleRetry(attempt, "fatal TLS alert");
         });
+        if (m_request.viaSocks()) {
+            // No interface binding: the SOCKS entry is loopback; only the race uses this mode.
+            logStage(QStringLiteral("connect_requested"), QStringLiteral("via_socks=1"));
+#ifdef MAYAK_TUNNEL_PROBE_TESTING
+            const quint16 socksTargetPort = m_request.testPort ? m_request.testPort : quint16(443);
+#else
+            constexpr quint16 socksTargetPort = 443;
+#endif
+            m_socket->connectToHostEncrypted(host, socksTargetPort, QIODevice::ReadWrite, QAbstractSocket::AnyIPProtocol);
+            return;
+        }
         // Let Qt create and own the TCP engine. Unlike descriptor adoption,
         // TCP bind does not enable a read notifier before DNS/connect begins.
         // Failure is terminal; there is no unbound/global-network fallback.
@@ -677,6 +703,7 @@ private:
     }
 
     bool boundIdentityMatches() {
+        if (m_request.viaSocks()) return true; // loopback proxy entry: nothing to bind
         if (!sourceIdentityMatches() || !interfaceIdentityMatches() || !m_binderOk) return false;
 #ifdef Q_OS_WIN
         DWORD index = 0;

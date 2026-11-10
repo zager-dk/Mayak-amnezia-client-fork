@@ -19,6 +19,16 @@ struct MayakTunnelProbeRequest {
     // Split tunneling (sites): endpoints routed through the VPN. When set, the probe connects
     // only to these IPv4 addresses; TLS still verifies the certificate for the host name.
     QList<mayak::split::ProbeEndpoint> pinnedEndpoints;
+    // Xray path race (no tunnel exists yet): connect through this local SOCKS5 entry of the
+    // race engine instead of binding to a tunnel interface. Never a tunnel proof by itself:
+    // the proof of a started path always binds to its tunnel interface.
+    quint16 socksPort = 0;
+    QString socksUser;
+    QString socksPassword;
+    bool viaSocks() const { return socksPort != 0; }
+    // Manually imported configs only: the egress is unknown, so any public IPv4 is accepted
+    // (TLS + nonce through the bound interface still required). Never for a Mayak server.
+    bool acceptAnyPublicEgress = false;
 #ifdef MAYAK_TUNNEL_PROBE_TESTING
     QString testHost;
     quint16 testPort = 0;

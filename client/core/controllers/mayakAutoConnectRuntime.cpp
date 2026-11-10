@@ -21,6 +21,11 @@
 #include <QJsonDocument>
 #include <QTimer>
 #include <QUrl>
+#include <QJsonArray>
+#include <QNetworkInterface>
+#include <QTcpServer>
+#include "core/utils/mayakTunnelProbe.h"
+#include "secureQSettings.h"
 #include <map>
 
 namespace ac = mayak::autoconnect;
@@ -43,6 +48,54 @@ AvoidedExit& avoidedExitStorage() { static AvoidedExit avoided; return avoided; 
 struct LocalStartRetries { int count = 0; bool autoRestart = false; };
 LocalStartRetries& localStartRetriesStorage() { static LocalStartRetries retries; return retries; }
 constexpr qint64 kAvoidExitMs = 10 * 60 * 1000;
+// Path memory: on a network where AWG did not come up and an Xray path did, the next connects
+// start with the Xray paths for a while. Stored only on this device as a salted hash of the
+// local network (interface names and IPv4 subnets); never sent anywhere, never logged.
+constexpr qint64 kXrayFirstMs = 12 * 60 * 60 * 1000;
+const char* kPathMemoryKey = "Mayak/pathMemory";
+const char* kPathSaltKey = "Mayak/pathMemorySalt";
+QString localNetworkKey(SecureQSettings* settings) {
+    if (!settings) return {};
+    QString salt = settings->value(kPathSaltKey).toString();
+    if (salt.size() != 64) { salt = B::randomRequestId(); settings->setValue(kPathSaltKey, salt); }
+    QStringList parts;
+    for (const auto& iface : QNetworkInterface::allInterfaces()) {
+        const auto flags = iface.flags();
+        if (!(flags & QNetworkInterface::IsUp) || !(flags & QNetworkInterface::IsRunning) || (flags & QNetworkInterface::IsLoopBack)) continue;
+        for (const auto& entry : iface.addressEntries()) {
+            if (entry.ip().protocol() != QAbstractSocket::IPv4Protocol || entry.prefixLength() <= 0) continue;
+            const quint32 mask = entry.prefixLength() >= 32 ? 0xffffffffu : ~((1u << (32 - entry.prefixLength())) - 1u);
+            parts << iface.name() + '/' + QHostAddress(entry.ip().toIPv4Address() & mask).toString() + '/' + QString::number(entry.prefixLength());
+        }
+    }
+    if (parts.isEmpty()) return {};
+    parts.sort();
+    return QString::fromLatin1(QCryptographicHash::hash((salt + '|' + parts.join('|')).toUtf8(), QCryptographicHash::Sha256).toHex());
+}
+bool rememberedXrayFirst(SecureQSettings* settings, const QString& network) {
+    if (!settings || network.isEmpty()) return false;
+    const auto memory = QJsonDocument::fromJson(settings->value(kPathMemoryKey).toByteArray()).object();
+    const auto entry = memory.value(network).toObject();
+    return entry.value("xrayFirst").toBool() && entry.value("until").toDouble() > double(QDateTime::currentMSecsSinceEpoch());
+}
+void rememberPath(SecureQSettings* settings, const QString& network, bool xrayFirst) {
+    if (!settings || network.isEmpty()) return;
+    auto memory = QJsonDocument::fromJson(settings->value(kPathMemoryKey).toByteArray()).object();
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    for (const auto& key : memory.keys())
+        if (memory.value(key).toObject().value("until").toDouble() <= double(now)) memory.remove(key);
+    if (xrayFirst) memory.insert(network, QJsonObject{{"xrayFirst", true}, {"until", double(now + kXrayFirstMs)}});
+    else memory.remove(network);
+    while (memory.size() > 16) memory.remove(memory.keys().first());
+    settings->setValue(kPathMemoryKey, QJsonDocument(memory).toJson(QJsonDocument::Compact));
+}
+quint16 freeLoopbackPort() {
+    QTcpServer server;
+    if (!server.listen(QHostAddress::LocalHost, 0)) return 0;
+    const quint16 port = server.serverPort();
+    server.close();
+    return port;
+}
 qint64 utcDeadline(qint64 mono) { return QDateTime::currentMSecsSinceEpoch() + qMax<qint64>(0, mono-B::monotonicMillis()); }
 QJsonObject payloadFor(const at::AttemptRecord& r) {
     return {{"auth_data", QJsonObject{{"api_key",r.deviceApiKey()}}}, {"installation_uuid",r.installationUuid()},
@@ -72,6 +125,7 @@ QString errorText(ac::ErrorCategory e) {
     case ac::ErrorCategory::AccountExpired: return QStringLiteral("Срок доступа закончился. Откройте личный кабинет.");
     case ac::ErrorCategory::NotReady: return QStringLiteral("Сервер готовит доступ. Повторите подключение через несколько секунд.");
     case ac::ErrorCategory::StopUnconfirmed: return QStringLiteral("Не удалось подтвердить отключение. Повторите попытку для безопасного завершения.");
+    case ac::ErrorCategory::Unsupported: return QStringLiteral("Выбранный способ подключения недоступен для этого сервера. Выберите «Автоматически» в настройках подключения.");
     default: return QStringLiteral("Не удалось подключиться к доступному серверу. Проверьте интернет и повторите попытку.");
     }
 }
@@ -86,7 +140,21 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     QPointer<SecureAppSettingsRepository> app;
     QPointer<ConnectionController> connection;
     SubscriptionController* subscription;
+    SecureQSettings* settings = nullptr;
     ad::Transport transport;
+    // Connection method for this session ("auto", "awg", "xray") and the local network key of
+    // the path memory, both fixed when the session starts (before any tunnel exists).
+    QString method = QStringLiteral("auto");
+    QString networkKey;
+    // Xray path race engine (one per session at a time). Starts wait until it is stopped.
+    struct Race {
+        bool engineActive = false;   // started or starting; a stop is still owed
+        bool stopping = false;
+        QString requestId;
+        std::pair<ac::CycleId,ac::AttemptId> tag{0,0};
+        std::vector<QPointer<MayakTunnelProbe>> probes;
+        std::function<void()> afterStop; // a path start waiting for the engine to stop
+    } race;
     std::unique_ptr<at::MayakAttemptStore> store;
     std::unique_ptr<B> bridge;
     std::unique_ptr<ac::Coordinator> coordinator;
@@ -126,9 +194,15 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         bool inFlight = false;
     } rec;
     QVariantMap connectedLocation;
+    struct XrayEntry { ad::XrayPath path; ad::XrayPathConfig config; };
     struct Attempt {
         at::AttemptIdentity identity;
         ac::Candidate candidate;
+        ac::Path path{"awg", ac::PathKind::Awg}; // path of the current/last backend start
+        int pathStarts = 0;
+        std::vector<XrayEntry> xray;              // validated Xray paths of this allocation
+        bool awgFailedHere = false;               // an AWG path of this allocation did not prove
+        qint64 probeStartedMono = 0;
         QString allocation;
         QString encodedConfig;
         QString exitLocationCityId;
@@ -193,7 +267,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
 
     explicit Session(MayakAutoConnectRuntime* f, QString id)
         : facade(f), servers(f->m_servers), app(f->m_app), connection(f->m_connection),
-          subscription(f->m_subscription), transport(f->m_transport), store(new at::MayakAttemptStore(f->m_settings)),
+          subscription(f->m_subscription), settings(f->m_settings), transport(f->m_transport), store(new at::MayakAttemptStore(f->m_settings)),
           bridge(new B(f->m_port)), serverId(std::move(id)), epoch(randomId()), cycleToken(randomId()) {
         auto& retries=localStartRetriesStorage();
         if (!retries.autoRestart) retries.count=0;
@@ -363,6 +437,10 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             .addField(apiDefs::key::publicKey,keys.wireGuardClientPubKey).build();
         authority={endpoint,common.value("installation_uuid").toString(),keys.wireGuardClientPubKey,
             cfg->authData.toJson().value("api_key").toString(),cfg->serviceType(),QStringLiteral("awg"),cfg->apiConfig.userCountryCode,{}};
+        method=app->mayakConnectionMethod();
+        networkKey=localNetworkKey(settings);
+        logNet(QStringLiteral("event=connection_method method=%1 xray_first=%2").arg(method)
+            .arg(rememberedXrayFirst(settings,networkKey) ? 1 : 0));
         preflightDeadline=now()+10000;
         inspectPreflight();
         timer.start();
@@ -576,10 +654,11 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         case ac::State::Idle: phase=QStringLiteral("idle"); break;
         case ac::State::Fetching: phase=QStringLiteral("fetching"); break;
         case ac::State::Admitting: phase=QStringLiteral("admitting"); break;
+        case ac::State::Racing: phase=QStringLiteral("starting"); break;
         case ac::State::Starting: phase=QStringLiteral("starting"); break;
         case ac::State::Verifying: phase=QStringLiteral("verifying"); break;
         case ac::State::Connected: phase=QStringLiteral("connected"); break;
-        case ac::State::Stopping: phase=QStringLiteral("stopping"); break;
+        case ac::State::Stopping: phase=s.switchingPath ? QStringLiteral("starting") : QStringLiteral("stopping"); break;
         case ac::State::Failed: phase=QStringLiteral("failed"); break;
         case ac::State::Cancelled: phase=QStringLiteral("cancelled"); break;
         }
@@ -589,7 +668,13 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             output(Vpn::ConnectionState::Preparing, adoption.pending ? QStringLiteral("Проверяем подключение…")
                                                                      : QStringLiteral("Выбираем доступный сервер…"));
             break;
-        case ac::State::Starting: case ac::State::Verifying:
+        case ac::State::Racing:
+            logNet(QStringLiteral("event=race_begin"));
+            output(Vpn::ConnectionState::Connecting,QStringLiteral("Подбираем способ подключения…")); break;
+        case ac::State::Starting:
+            logNet(QStringLiteral("event=path_start path=%1").arg(QString::fromStdString(s.pathId)));
+            output(Vpn::ConnectionState::Connecting,QStringLiteral("Проверяем VPN-соединение…")); break;
+        case ac::State::Verifying:
             output(Vpn::ConnectionState::Connecting,QStringLiteral("Проверяем VPN-соединение…")); break;
         case ac::State::Connected:
             lastMonitor=now(); {
@@ -598,8 +683,19 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 if (selected && !selected->cancelled) {
                     location.insert(QStringLiteral("candidateId"), selected->identity.candidateId);
                     location.insert(QStringLiteral("cityId"), selected->exitLocationCityId);
+                    location.insert(QStringLiteral("pathId"), QString::fromStdString(s.pathId));
+                    if (avoidedExitStorage().candidateId.compare(selected->identity.candidateId,Qt::CaseInsensitive)==0)
+                        avoidedExitStorage()={{},0,avoidedExitStorage().knownExits};
                     selected->rxChangedAt=now();
+                    // Path memory (auto mode only): Xray proved here after AWG did not -> Xray first
+                    // for a while on this network; AWG proved -> back to the default order.
+                    if (method==QStringLiteral("auto") && !selected->adopted) {
+                        const bool viaXray=selected->path.kind==ac::PathKind::Xray;
+                        if (!viaXray) rememberPath(settings,networkKey,false);
+                        else if (selected->awgFailedHere || rememberedXrayFirst(settings,networkKey)) rememberPath(settings,networkKey,true);
+                    }
                 }
+                logNet(QStringLiteral("event=connected path=%1").arg(QString::fromStdString(s.pathId)));
                 const bool networkLost=rec.networkLost;
                 rec={}; rec.networkLost=networkLost; rec.networkLostAt=networkLost ? now() : 0;
                 connectRetries=0; connectRetryAt=0; abandonUnconfirmed=false;
@@ -608,7 +704,11 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 output(Vpn::ConnectionState::Connected,QStringLiteral("Подключено"),location);
             } break;
         case ac::State::Stopping:
-            output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…")); break;
+            if (s.switchingPath) {
+                logNet(QStringLiteral("event=path_failed path=%1 error=%2").arg(QString::fromStdString(s.pathId)).arg(int(s.error)));
+                output(Vpn::ConnectionState::Connecting,QStringLiteral("Пробуем другой способ подключения…"));
+            } else output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…"));
+            break;
         case ac::State::Failed:
             terminal=true;
             if (s.error==ac::ErrorCategory::StopUnconfirmed && localStartFailed && !cancelled && !reconnectWanted &&
@@ -911,6 +1011,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         attempts[{c,n}]=a;
         ad::Request request; request.action="acquire"; request.attemptId=a->identity.attemptId; request.cycleToken=cycleToken;
         request.candidateId=a->identity.candidateId; request.commonPayload=common; request.deadlineUtcMs=utcDeadline(deadline);
+        request.requestPaths=method!=QStringLiteral("awg");
         ++inFlight;
         ad::MayakAdmissionClient::postAsync(request,transport,[self,a,c,n,done](ad::Response r) mutable {
             --self->inFlight;
@@ -921,7 +1022,9 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 a->connectBefore=self->now()+QDateTime::currentDateTimeUtc().msecsTo(r.acquire.connectBefore);
                 // Pre-send record remains sufficient for exact cleanup if this write fails.
                 const bool saved=self->store->attachAllocation(a->identity,a->allocation).ok;
-                done(c,n,{ac::AdmissionStatus::Admitted,{a->allocation.toStdString(), saved?a->encodedConfig.toStdString():std::string{}}}); return;
+                ac::Allocation allocation{a->allocation.toStdString(), saved?a->encodedConfig.toStdString():std::string{}, {}, false};
+                self->planPaths(a,r.acquire,&allocation);
+                done(c,n,{ac::AdmissionStatus::Admitted,std::move(allocation)}); return;
             }
             ac::AdmissionStatus status=ac::AdmissionStatus::Malformed;
             if(r.authenticatedResponse && r.isError) {
@@ -959,7 +1062,9 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 if (r.acquire.exitLocationCandidateId.compare(a->identity.candidateId, Qt::CaseInsensitive) == 0)
                     a->exitLocationCityId = r.acquire.exitLocationCityId;
                 a->connectBefore=self->now()+qMax<qint64>(15000,QDateTime::currentDateTimeUtc().msecsTo(r.acquire.connectBefore));
-                done(c,n,{ac::AdmissionStatus::Admitted,{a->allocation.toStdString(),a->encodedConfig.toStdString()}}); return;
+                // The adopted backend is the AWG one that is already running.
+                done(c,n,{ac::AdmissionStatus::Admitted,{a->allocation.toStdString(),a->encodedConfig.toStdString(),
+                    {{"awg",ac::PathKind::Awg}},true}}); return;
             }
             ac::AdmissionStatus status=ac::AdmissionStatus::NetworkError;
             if (r.authenticatedResponse && r.isError) {
@@ -978,9 +1083,75 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     std::shared_ptr<Attempt> get(ac::CycleId c,ac::AttemptId a) {
         auto i=attempts.find({c,a}); return i==attempts.end()?nullptr:i->second;
     }
-    void start(ac::CycleId c,ac::AttemptId n,const ac::Allocation& allocation,ac::Millis deadline,StartDone done) override {
-        if (auto adopted=get(c,n); adopted && adopted->adopted) { startAdopted(c,n,deadline,std::move(done)); return; }
+    // Orders the paths of a fresh allocation by the connection method and the path memory.
+    void planPaths(const std::shared_ptr<Attempt>& a,const ad::AcquireResponse& acquired,ac::Allocation* allocation) {
+        a->xray.clear();
+        for (const auto& p:acquired.xrayPaths) {
+            XrayEntry entry{p,{}}; QString reason;
+            if (ad::decodeXrayPathConfig(p,QString::fromStdString(a->candidate.publicIpv4),&entry.config,&reason)) a->xray.push_back(entry);
+            else logNet(QStringLiteral("event=xray_path_rejected path=%1 reason=%2").arg(p.id,reason));
+        }
+        if (acquired.xrayPathsOffered && !acquired.xrayPathsRejected.isEmpty())
+            logNet(QStringLiteral("event=xray_paths_rejected reason=%1").arg(acquired.xrayPathsRejected));
+        std::vector<ac::Path> xray;
+        for (const auto& e:a->xray) xray.push_back({e.path.id.toStdString(),ac::PathKind::Xray});
+        const ac::Path awg{"awg",ac::PathKind::Awg};
+        allocation->pathsExplicit=true;
+        if (method==QStringLiteral("awg")) allocation->paths={awg};
+        else if (method==QStringLiteral("xray")) allocation->paths=xray;
+        else if (rememberedXrayFirst(settings,networkKey)) { allocation->paths=xray; allocation->paths.push_back(awg); }
+        else { allocation->paths={awg}; allocation->paths.insert(allocation->paths.end(),xray.begin(),xray.end()); }
+        // The service does not enforce connect_before; a later path of this allocation still
+        // belongs to the same admitted place on the exit.
+        if (!xray.empty()) a->connectBefore=qMax(a->connectBefore,now()+ac::Coordinator::timing().cycleWithXrayMs);
+        QStringList order; for (const auto& p:allocation->paths) order<<QString::fromStdString(p.id);
+        logNet(QStringLiteral("event=paths order=%1").arg(order.join(',')));
+    }
+    // A later path of the same attempt gets a fresh backend ticket and clean per-start state.
+    void preparePathStart(const std::shared_ptr<Attempt>& a,const ac::Path& path) {
+        if (a->pathStarts>0) {
+            a->ticket={a->identity.attemptId+QStringLiteral("-p")+QString::number(a->pathStarts),std::make_shared<B::StartGate>()};
+            a->started=false; a->stopped=false; a->cancelled=false; a->stopTicket={};
+            a->health={}; a->healthAt=0; a->expected={}; a->reset=false; a->rxChangedAt=0; a->replacementAllowedUntil=0;
+            a->proofDone={}; a->probing=false; a->tlsOk=false; a->proof={};
+        }
+        ++a->pathStarts; a->path=path;
+    }
+    void start(ac::CycleId c,ac::AttemptId n,const ac::Allocation& allocation,const ac::Path& path,ac::Millis deadline,StartDone done) override {
+        auto a=get(c,n);
+        if (!a || cancelled) { done(c,n,{ac::StartStatus::MalformedConfig}); return; }
+        if (a->path.kind==ac::PathKind::Awg && a->pathStarts>0 && !a->adopted) a->awgFailedHere=true;
+        preparePathStart(a,path);
+        // Never start a tunnel while the race engine still runs: wait for its stop (bounded by the
+        // race stop deadline), then start.
+        if (race.engineActive) {
+            auto self=shared_from_this(); const auto copy=allocation; const auto p=path;
+            race.afterStop=[self,c,n,copy,p,deadline,done]() mutable { self->startPath(c,n,copy,p,deadline,std::move(done)); };
+            return;
+        }
+        startPath(c,n,allocation,path,deadline,std::move(done));
+    }
+    void startPath(ac::CycleId c,ac::AttemptId n,const ac::Allocation& allocation,const ac::Path& path,ac::Millis deadline,StartDone done) {
+        auto a=get(c,n);
+        if (!a || a->cancelled || cancelled) { done(c,n,{ac::StartStatus::MalformedConfig}); return; }
+        if (path.kind==ac::PathKind::Xray) { startXray(c,n,path,deadline,std::move(done)); return; }
+        if (a->adopted) { startAdopted(c,n,deadline,std::move(done)); return; }
         startNew(c,n,allocation,deadline,std::move(done));
+    }
+    void startXray(ac::CycleId c,ac::AttemptId n,const ac::Path& path,ac::Millis deadline,StartDone done) {
+        auto self=shared_from_this(); auto a=get(c,n);
+        const auto entry=std::find_if(a->xray.begin(),a->xray.end(),[&path](const XrayEntry& e){ return e.path.id.toStdString()==path.id; });
+        if (entry==a->xray.end() || !identityCurrent() || a->cancelled) { done(c,n,{ac::StartStatus::MalformedConfig}); return; }
+        QJsonObject config;
+        if (connection->prepareMayakXrayConnection(serverId,entry->config.root,config)!=ErrorCode::NoError ||
+            !identityCurrent() || !store->markMayHaveStarted(a->identity).ok) {
+            done(c,n,{ac::StartStatus::MalformedConfig}); return;
+        }
+        a->started=true; a->startMono=now(); a->startUtc=QDateTime::currentMSecsSinceEpoch();
+        bridge->startPrepared(a->ticket,serverId,config,qMin<qint64>(deadline,a->connectBefore),[self,a,c,n,done](B::Result r) {
+            a->expected=r.expected;
+            done(c,n,{r.outcome==B::Outcome::Started?ac::StartStatus::Started:ac::StartStatus::NetworkError});
+        });
     }
     // Hand the running backend to the adopted attempt: the service confirms control identity +
     // ticket and soft-replaces the backend (new socket, same TUN), so the normal proof below
@@ -1046,14 +1217,45 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             done(c,n,{r.outcome==B::Outcome::Started?ac::StartStatus::Started:ac::StartStatus::NetworkError});
         });
     }
-    void verifyOwnTunnel(ac::CycleId c,ac::AttemptId n,const std::string& nonce,const std::vector<std::string>& ips,
+    void verifyOwnTunnel(ac::CycleId c,ac::AttemptId n,const ac::Path&,const std::string& nonce,const std::vector<std::string>& ips,
                          ac::Millis deadline,ProofDone done) override {
         auto a=get(c,n); if(!a) { done(c,n,{}); return; }
         a->proofDone=std::move(done); a->nonce=QString::fromStdString(nonce); a->proofDeadline=deadline;
         a->egress.clear(); for(const auto& ip:ips) a->egress.append(QString::fromStdString(ip));
         a->tlsOk=false; a->probing=false; advanceProof({c,n},a);
     }
+    // Xray: no peer telemetry. Proof = one probe bound to this path's own tunnel interface (as
+    // reported for this ticket), started after the path started: nonce, TLS and expected egress.
+    void advanceXrayProof(std::pair<ac::CycleId,ac::AttemptId> tag,const std::shared_ptr<Attempt>& a) {
+        if(!a->proofDone || a->cancelled) return;
+        if(now()>=a->proofDeadline || a->reset) { auto done=std::move(a->proofDone); done(tag.first,tag.second,{}); return; }
+        if(!a->health.valid || !a->expected.matches(a->health)) return;
+        if(!a->probing) {
+            a->probing=true; a->probeStartedMono=now(); a->baselineRx=a->health.rxTotal; a->baselineTx=a->health.txTotal;
+            MayakTunnelProbeRequest req; req.attemptTag=a->ticket.opaqueAttempt; req.localAddress=QHostAddress(a->health.localAddress.section('/',0,0));
+            req.interfaceName=a->health.interfaceName; req.expectedEgressIpv4=a->egress; req.nonce=a->nonce;
+            req.deadlineMs=int(qBound(qint64(1),qint64(a->proofDeadline-now()),qint64(8000)));
+            auto self=shared_from_this();
+            bridge->probe(a->ticket,req,a->proofDeadline,[self,a,tag](B::Ticket t,bool ok,MayakTunnelProbeProof proof,QString) {
+                if(!a->ticket.same(t) || !a->proofDone || a->cancelled) return;
+                if(!ok) { auto done=std::move(a->proofDone); done(tag.first,tag.second,{}); return; }
+                a->tlsOk=true; a->proof=proof; self->advanceXrayProof(tag,a);
+            });
+            return;
+        }
+        if(!a->tlsOk) return;
+        ac::ProofResult result; result.probeSucceeded=true;
+        auto& e=result.evidence;
+        e.certificateValid=a->proof.certificateVerified; e.nonceMatched=a->proof.nonce==a->nonce;
+        e.nonce=a->nonce.toStdString(); e.observedEgressIp=a->proof.observedEgressIpv4.toStdString();
+        e.rxBytesBefore=a->baselineRx; e.rxBytesAfter=a->health.rxTotal; e.counterReset=a->reset;
+        e.pathId=a->path.id; e.probeStartedAt=a->probeStartedMono;
+        e.interfaceBound=a->proof.attemptTag==a->ticket.opaqueAttempt && a->proof.interfaceName==a->health.interfaceName &&
+            a->proof.localAddress==a->health.localAddress.section('/',0,0);
+        auto done=std::move(a->proofDone); done(tag.first,tag.second,std::move(result));
+    }
     void advanceProof(std::pair<ac::CycleId,ac::AttemptId> tag,const std::shared_ptr<Attempt>& a) {
+        if (a->path.kind==ac::PathKind::Xray) { advanceXrayProof(tag,a); return; }
         if(!a->proofDone || a->cancelled) return;
         if(now()>=a->proofDeadline || a->reset) { auto done=std::move(a->proofDone); done(tag.first,tag.second,{}); return; }
         if(!a->health.valid || !a->expected.matches(a->health)) return;
@@ -1098,7 +1300,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         // A started backend that never got a single handshake answered (not the user's cancel):
         // this exit is unreachable from here; the next connects try it last.
         // (a->cancelled is set by the coordinator's own retry stop; the user's cancel is `cancelled`.)
-        if (!a->adopted && !a->health.valid && !cancelled && now()-a->startMono>=5000) {
+        if (a->path.kind==ac::PathKind::Awg && !a->adopted && !a->health.valid && !cancelled && now()-a->startMono>=5000) {
             if (recoveryTimingStorage().noHealthMeansLocalFailure) {
                 // Windows: no health = the tunnel interface never existed. Local, not the exit's fault.
                 localStartFailed=true;
@@ -1201,7 +1403,104 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         ad::MayakAdmissionClient::postAsync(req,transport,[finish](ad::Response) { finish(); });
     }
     void cancelOwned(ac::CycleId c,ac::AttemptId n) override {
+        if (race.tag==std::make_pair(c,n)) stopRace();
         auto a=get(c,n); if(!a) return; a->cancelled=true; a->proofDone={}; bridge->cancel(a->ticket);
+    }
+    // ---------- Xray path race ----------
+    // One xray engine with one password-protected loopback SOCKS entry per path (no tunnel, no
+    // routes). Probes run in parallel through each entry; the first answers lead the order.
+    void racePaths(ac::CycleId c,ac::AttemptId n,const std::vector<ac::Path>& paths,const std::vector<std::string>& egress,
+                   ac::Millis deadline,RaceDone done) override {
+        auto a=get(c,n);
+        if (!a || cancelled || a->cancelled || !bridge->canRace() || race.engineActive || paths.size()<2) {
+            logNet(QStringLiteral("event=race_skipped paths=%1").arg(paths.size()));
+            done(c,n,{false,{}}); return;
+        }
+        struct Lane { std::string id; quint16 port=0; QString user,pass,nonce; int state=0; }; // 0 running, 1 ok, 2 failed
+        auto lanes=std::make_shared<std::vector<Lane>>();
+        QJsonArray inbounds,outbounds,rules;
+        for (const auto& path:paths) {
+            const auto entry=std::find_if(a->xray.begin(),a->xray.end(),[&path](const XrayEntry& e){ return e.path.id.toStdString()==path.id; });
+            const quint16 port=freeLoopbackPort();
+            if (entry==a->xray.end() || !port) continue;
+            Lane lane{path.id,port,B::randomRequestId().left(16),B::randomRequestId().left(32),randomId(),0};
+            const QString index=QString::number(lanes->size());
+            inbounds.append(QJsonObject{{"tag","in-"+index},{"listen","127.0.0.1"},{"port",port},{"protocol","socks"},
+                {"settings",QJsonObject{{"auth","password"},{"udp",false},
+                    {"accounts",QJsonArray{QJsonObject{{"user",lane.user},{"pass",lane.pass}}}}}}});
+            QJsonObject outbound=entry->config.clientJson.value("outbounds").toArray().first().toObject();
+            outbound.insert("tag","out-"+index);
+            outbounds.append(outbound);
+            rules.append(QJsonObject{{"type","field"},{"inboundTag",QJsonArray{"in-"+index}},{"outboundTag","out-"+index}});
+            lanes->push_back(lane);
+        }
+        if (lanes->size()<2) { done(c,n,{false,{}}); return; }
+        // Rule 5: no access/DNS log (an empty "access" would log every destination to stdout).
+        const QJsonObject config{{"log",QJsonObject{{"loglevel","warning"},{"access","none"},{"dnsLog",false}}},{"inbounds",inbounds},{"outbounds",outbounds},
+            {"routing",QJsonObject{{"domainStrategy","AsIs"},{"rules",rules}}}};
+        race={}; race.engineActive=true; race.requestId=randomId(); race.tag={c,n};
+        const QString request=race.requestId;
+        const qint64 started=now();
+        auto self=shared_from_this();
+        auto settled=std::make_shared<bool>(false);
+        // Order: answered lanes first (answer order), then lanes still running; failed ones dropped.
+        auto order=std::make_shared<std::vector<std::string>>();
+        auto finish=[self,c,n,done,settled,lanes,order,request,started](bool ran) mutable {
+            if (*settled) return; *settled=true;
+            std::vector<std::string> result=*order;
+            int failed=0;
+            for (const auto& lane:*lanes) { if (lane.state==0) result.push_back(lane.id); if (lane.state==2) ++failed; }
+            QStringList shown; for (const auto& id:result) shown<<QString::fromStdString(id);
+            self->logNet(QStringLiteral("event=race_done ran=%1 order=%2 failed=%3 elapsed_ms=%4")
+                .arg(ran ? 1 : 0).arg(shown.join(',')).arg(failed).arg(self->now()-started));
+            if (self->race.requestId==request) self->stopRace();
+            done(c,n,{ran,ran ? result : std::vector<std::string>{}});
+        };
+        const qint64 raceEnd=deadline-300; // leave the engine stop inside the coordinator's budget
+        QTimer::singleShot(int(qMax<qint64>(0,raceEnd-now())),this,[finish,lanes]() mutable {
+            for (auto& lane:*lanes) if (lane.state==0) lane.state=2; // no answer in time = failed
+            finish(true);
+        });
+        bridge->raceStart(request,config,qMin<qint64>(raceEnd,now()+2500),[self,a,lanes,order,finish,request,egress,raceEnd](bool ok) mutable {
+            if (self->race.requestId!=request || !self->race.engineActive) return;
+            if (!ok) { self->logNet(QStringLiteral("event=race_engine_failed")); finish(false); return; }
+            QStringList expected; for (const auto& ip:egress) expected<<QString::fromStdString(ip);
+            for (std::size_t i=0;i<lanes->size();++i) {
+                auto& lane=(*lanes)[i];
+                auto* probe=new MayakTunnelProbe(self.get());
+                self->race.probes.push_back(probe);
+                QObject::connect(probe,&MayakTunnelProbe::finished,self.get(),[self,lanes,order,finish,i,probe,request](quint64,bool success,MayakTunnelProbeProof,QString) mutable {
+                    probe->deleteLater();
+                    if (self->race.requestId!=request) return;
+                    auto& lane=(*lanes)[i];
+                    if (lane.state!=0) return;
+                    lane.state=success ? 1 : 2;
+                    if (success) {
+                        order->push_back(lane.id);
+                        // The fastest path is known: the others keep their chance only as fallback.
+                        if (order->size()==1) QTimer::singleShot(300,self.get(),[finish]() mutable { finish(true); });
+                    }
+                    if (std::all_of(lanes->begin(),lanes->end(),[](const auto& l){ return l.state!=0; })) finish(true);
+                });
+                MayakTunnelProbeRequest req; req.attemptTag=request; req.nonce=lane.nonce; req.expectedEgressIpv4=expected;
+                req.socksPort=lane.port; req.socksUser=lane.user; req.socksPassword=lane.pass;
+                req.deadlineMs=int(qBound(qint64(1),qint64(raceEnd-self->now()),qint64(8000)));
+                probe->start(req);
+            }
+        });
+    }
+    void stopRace() {
+        for (auto& probe:race.probes) if (probe) { probe->cancel(); probe->deleteLater(); }
+        race.probes.clear();
+        race.requestId.clear(); race.tag={0,0};
+        if (!race.engineActive || race.stopping) return;
+        race.stopping=true;
+        auto self=shared_from_this();
+        bridge->raceStop(QStringLiteral("stop"),now()+2000,[self](bool stopped) {
+            self->race.stopping=false; self->race.engineActive=false;
+            if (!stopped) self->logNet(QStringLiteral("event=race_stop_unconfirmed"));
+            if (auto next=std::move(self->race.afterStop)) { self->race.afterStop={}; next(); }
+        });
     }
     void logNet(const QString& text) const { qInfo().noquote() << QStringLiteral("MayakNet ") + text; }
     std::shared_ptr<Attempt> connectedAttempt() {
@@ -1294,7 +1593,7 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         // A single random failure is not enough unless the underlying network just changed.
         const bool stuck=!rec.networkLost && (recentNetwork || rec.probeFailures>=2) &&
             rxStale>=(recentNetwork ? t.stuckRxAfterNetworkMs : t.stuckRxMs);
-        if (stuck && bridge->canRecover() && !rec.inFlight && rec.attempts<t.recoverBackoffMs.size() && now()>=rec.nextAt) {
+        if (stuck && a->path.kind==ac::PathKind::Awg && bridge->canRecover() && !rec.inFlight && rec.attempts<t.recoverBackoffMs.size() && now()>=rec.nextAt) {
             showRecovering();
             startRecover(a);
         }
@@ -1327,8 +1626,13 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             const auto current=self->coordinator->status();
             if (current.state!=ac::State::Connected || current.cycle!=s.cycle || current.attempt!=s.attempt) return;
             // Idle RX or provider/API failure alone never tears down a tunnel.
-            const bool degraded=a->reset || self->now()-a->healthAt>12000 ||
-                (a->health.txTotal>tx && a->health.rxTotal==rx && QDateTime::currentMSecsSinceEpoch()-qint64(a->health.latestHandshakeEpochMs)>180000);
+            // Xray: no peer telemetry, and interface counters prove nothing (tun2socks answers TCP
+            // locally on Windows; Android has none). A failed probe counts only while the network
+            // is up and from the second failure in a row, so the third ends the path (2 degraded).
+            const bool xray=a->path.kind==ac::PathKind::Xray;
+            const bool degraded=xray ? (!ok && !self->rec.networkLost && self->rec.probeFailures>=1) :
+                (a->reset || self->now()-a->healthAt>12000 ||
+                (a->health.txTotal>tx && a->health.rxTotal==rx && QDateTime::currentMSecsSinceEpoch()-qint64(a->health.latestHandshakeEpochMs)>180000));
             if(!ok && degraded) {
                 self->reconnectWanted=true;
                 // If this ends the cycle, the next one tries another exit first.

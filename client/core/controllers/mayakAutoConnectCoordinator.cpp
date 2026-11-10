@@ -31,6 +31,8 @@ bool in(const std::array<unsigned, 4>& a, unsigned x, unsigned y = 0) {
 }
 } // namespace
 
+Timing& Coordinator::timing() { static Timing t; return t; }
+
 void Coordinator::AllocationOwner::release(Adapter::BasicDone done) {
     if (releaseRequested) return;
     releaseRequested = true; // set before calling a potentially synchronous adapter
@@ -93,19 +95,20 @@ void Coordinator::begin() {
     if (status_.state == State::Failed && status_.error == ErrorCategory::StopUnconfirmed) return;
     if (status_.state == State::Stopping) { restartAfterStop_ = true; return; }
     if (status_.state == State::Fetching || status_.state == State::Admitting ||
-        status_.state == State::Starting || status_.state == State::Verifying ||
-        status_.state == State::Stopping) {
+        status_.state == State::Racing || status_.state == State::Starting ||
+        status_.state == State::Verifying || status_.state == State::Stopping) {
         restartAfterStop_ = true;
         cancelCurrent();
         return; // cancellation owns both immediate and deferred restart
     }
     status_.cycle = ++nextCycle_; status_.attempt = ++nextAttempt_;
-    status_.candidateId.clear(); status_.error = ErrorCategory::None;
+    status_.candidateId.clear(); status_.pathId.clear(); status_.switchingPath = false; status_.error = ErrorCategory::None;
     candidates_.clear(); nextCandidate_ = 0; allocation_ = {}; allocationOwner_.reset();
+    paths_.clear(); pathIndex_ = 0; raced_ = false; ++pathSeq_; pendingError_ = ErrorCategory::None;
     awaitingRelease_ = false;
     backendMayBeRunning_ = false; nonce_.clear(); degradedProbeFailures_ = 0;
     overallDeadline_ = 0;
-    phaseDeadline_ = clock_.now() + 10000;
+    phaseDeadline_ = clock_.now() + timing().fetchMs;
     if (!publish(State::Fetching).valid()) return;
     const auto c = status_.cycle, a = status_.attempt;
     std::weak_ptr<CallbackGate> weak = callbackGate_;
@@ -135,7 +138,7 @@ void Coordinator::onFetch(CycleId c, AttemptId a, FetchStatus result, Snapshot s
     }
     // The 30 s selection budget starts once a fresh candidate snapshot exists.
     snapshotExpiresAt_ = snapshot.expiresAt;
-    overallDeadline_ = std::min(now + 30000, snapshotExpiresAt_);
+    overallDeadline_ = std::min(now + timing().cycleMs, snapshotExpiresAt_);
     std::unordered_set<std::string> ids, ips;
     for (const auto& candidate : snapshot.candidates) {
         if (candidate.id.empty() || candidate.port == 0 || candidate.expectedEgressIps.empty() ||
@@ -157,9 +160,10 @@ void Coordinator::tryNext() {
     if (clock_.now() >= overallDeadline_) { fail(ErrorCategory::Deadline); return; }
     if (nextCandidate_ >= candidates_.size()) { fail(pendingError_ == ErrorCategory::None ? ErrorCategory::Network : pendingError_); return; }
     currentCandidate_ = candidates_[nextCandidate_++].candidate;
-    status_.candidateId = currentCandidate_.id;
+    status_.candidateId = currentCandidate_.id; status_.pathId.clear(); status_.switchingPath = false;
     status_.attempt = ++nextAttempt_;
-    attemptStarted_ = clock_.now(); phaseDeadline_ = std::min(overallDeadline_, attemptStarted_ + 8000);
+    attemptStarted_ = clock_.now(); phaseDeadline_ = std::min(overallDeadline_, attemptStarted_ + timing().admitMs);
+    paths_.clear(); pathIndex_ = 0; raced_ = false;
     nonce_ = makeNonce();
     if (!publish(State::Admitting).valid()) return;
     const auto candidate = currentCandidate_;
@@ -194,7 +198,18 @@ void Coordinator::onAdmission(CycleId c, AttemptId a, AdmissionResult r, std::sh
             return;
         }
         allocation_ = std::move(r.allocation); allocationOwner_ = std::move(lease);
-        startAttempt(); return;
+        {
+            // Sanitize the adapter's path order: unique ids, bounded, AWG when nothing is given.
+            std::vector<Path> paths; std::unordered_set<std::string> seen;
+            for (const auto& path : allocation_.paths)
+                if (!path.id.empty() && paths.size() < 5 && seen.insert(path.id).second) paths.push_back(path);
+            if (paths.empty() && !allocation_.pathsExplicit) paths.push_back({"awg", PathKind::Awg});
+            if (paths.empty()) pendingError_ = ErrorCategory::Unsupported; // nothing this device may use here
+            paths_ = std::move(paths); pathIndex_ = 0; raced_ = false;
+            const bool xray = std::any_of(paths_.begin(), paths_.end(), [](const Path& p) { return p.kind == PathKind::Xray; });
+            if (xray) overallDeadline_ = std::min(snapshotExpiresAt_, std::max(overallDeadline_, clock_.now() + timing().cycleWithXrayMs));
+        }
+        startPath(); return;
     case AdmissionStatus::Full: pendingError_ = ErrorCategory::Capacity; tryNext(); return;
     case AdmissionStatus::NotReady: pendingError_ = ErrorCategory::NotReady; tryNext(); return;
     case AdmissionStatus::Disabled: pendingError_ = ErrorCategory::Disabled; tryNext(); return;
@@ -206,7 +221,67 @@ void Coordinator::onAdmission(CycleId c, AttemptId a, AdmissionResult r, std::sh
     }
 }
 
+void Coordinator::startPath() {
+    const Millis now = clock_.now();
+    if (pathIndex_ >= paths_.size()) {
+        releaseThen(StopPurpose::Retry, pendingError_ == ErrorCategory::None ? ErrorCategory::ProofFailed : pendingError_);
+        return;
+    }
+    if (now >= overallDeadline_ || now >= snapshotExpiresAt_) { releaseThen(StopPurpose::Retry, ErrorCategory::Deadline); return; }
+    if (currentPath().kind == PathKind::Xray && !raced_) { beginRace(); return; }
+    startAttempt();
+}
+
+void Coordinator::beginRace() {
+    raced_ = true;
+    std::vector<Path> xray;
+    for (auto i = pathIndex_; i < paths_.size(); ++i) if (paths_[i].kind == PathKind::Xray) xray.push_back(paths_[i]);
+    phaseDeadline_ = std::min(overallDeadline_, clock_.now() + timing().raceMs);
+    const auto seq = ++pathSeq_;
+    status_.pathId.clear(); status_.switchingPath = false;
+    if (!publish(State::Racing).valid()) return;
+    const auto c = status_.cycle, a = status_.attempt;
+    const auto egress = currentCandidate_.expectedEgressIps; const auto deadline = phaseDeadline_;
+    std::weak_ptr<CallbackGate> weak = callbackGate_;
+    adapter_.racePaths(c, a, xray, egress, deadline, [weak, c, a, seq](CycleId x, AttemptId y, RaceResult r) {
+        if (x != c || y != a) return;
+        if (auto gate = weak.lock(); gate && gate->owner) gate->owner->onRace(x, y, seq, std::move(r));
+    });
+}
+
+void Coordinator::onRace(CycleId c, AttemptId a, std::uint64_t seq, RaceResult r) {
+    if (!current(c, a) || status_.state != State::Racing || seq != pathSeq_) return;
+    ++pathSeq_; // a late result of this race is ignored
+    std::vector<Path> xray, others;
+    for (auto i = pathIndex_; i < paths_.size(); ++i)
+        (paths_[i].kind == PathKind::Xray ? xray : others).push_back(paths_[i]);
+    std::vector<Path> ordered;
+    if (!r.ran) ordered = xray;
+    else for (const auto& id : r.passed) {
+        const auto it = std::find_if(xray.begin(), xray.end(), [&id](const Path& p) { return p.id == id; });
+        const bool added = std::any_of(ordered.begin(), ordered.end(), [&id](const Path& p) { return p.id == id; });
+        if (it != xray.end() && !added) ordered.push_back(*it);
+    }
+    if (ordered.empty()) pendingError_ = ErrorCategory::ProofFailed; // no Xray path answered
+    paths_.resize(pathIndex_);
+    paths_.insert(paths_.end(), ordered.begin(), ordered.end());
+    paths_.insert(paths_.end(), others.begin(), others.end());
+    startPath();
+}
+
+void Coordinator::failPath(ErrorCategory error, bool fatalIfLast) {
+    const bool more = pathIndex_ + 1 < paths_.size() && clock_.now() < overallDeadline_;
+    if (more) { beginStop(StopPurpose::NextPath, error); return; }
+    beginStop(fatalIfLast ? StopPurpose::Finish : StopPurpose::Retry, error);
+}
+
 void Coordinator::startAttempt() {
+    const auto path = currentPath();
+    status_.pathId = path.id; status_.switchingPath = false;
+    pathStarted_ = clock_.now();
+    phaseDeadline_ = std::min(overallDeadline_, pathStarted_ + timing().startMs);
+    nonce_ = makeNonce();
+    const auto seq = ++pathSeq_;
     if (!publish(State::Starting).valid()) return;
     // Commit backend ownership immediately before the start effect. A Starting
     // observer may cancel an accepted lease before any backend effect exists.
@@ -214,9 +289,9 @@ void Coordinator::startAttempt() {
     const auto allocation = allocation_;
     const auto c = status_.cycle, a = status_.attempt;
     std::weak_ptr<CallbackGate> weak = callbackGate_;
-    adapter_.start(c, a, allocation, phaseDeadline_, [weak, c, a](CycleId x, AttemptId y, StartResult r) {
+    adapter_.start(c, a, allocation, path, phaseDeadline_, [weak, c, a, seq](CycleId x, AttemptId y, StartResult r) {
         if (x != c || y != a) return;
-        if (auto gate = weak.lock(); gate && gate->owner) gate->owner->onStart(x, y, r);
+        if (auto gate = weak.lock(); gate && gate->owner && gate->owner->pathSeq_ == seq) gate->owner->onStart(x, y, r);
         // A timeout/cancel/destruction already owns the one stop operation.
         // cancelOwned prevents a pending start from activating after that stop.
     });
@@ -225,23 +300,26 @@ void Coordinator::onStart(CycleId c, AttemptId a, StartResult r) {
     if (!current(c, a) || status_.state != State::Starting) return;
     if (r.status == StartStatus::Started) {
         backendMayBeRunning_ = true;
-        if (clock_.now() >= phaseDeadline_) { beginStop(StopPurpose::Retry, ErrorCategory::Deadline); return; }
+        if (clock_.now() >= phaseDeadline_) { failPath(ErrorCategory::Deadline, false); return; }
+        const auto path = currentPath();
+        phaseDeadline_ = std::min(overallDeadline_, clock_.now() +
+            (path.kind == PathKind::Xray ? timing().xrayVerifyMs : timing().awgVerifyMs));
         if (!publish(State::Verifying).valid()) return;
         const auto nonce = nonce_; const auto egress = currentCandidate_.expectedEgressIps;
         const auto cycle = status_.cycle, attempt = status_.attempt;
+        const auto seq = pathSeq_;
         std::weak_ptr<CallbackGate> weak = callbackGate_;
-        adapter_.verifyOwnTunnel(cycle, attempt, nonce, egress, phaseDeadline_,
-            [weak, cycle, attempt](CycleId x, AttemptId y, ProofResult p) {
+        adapter_.verifyOwnTunnel(cycle, attempt, path, nonce, egress, phaseDeadline_,
+            [weak, cycle, attempt, seq](CycleId x, AttemptId y, ProofResult p) {
                 if (x != cycle || y != attempt) return;
-                if (auto gate = weak.lock(); gate && gate->owner) gate->owner->onProof(x, y, std::move(p));
+                if (auto gate = weak.lock(); gate && gate->owner && gate->owner->pathSeq_ == seq) gate->owner->onProof(x, y, std::move(p));
             });
         return;
     }
     pendingError_ = (r.status == StartStatus::CryptoError) ? ErrorCategory::CryptoHealth :
                     (r.status == StartStatus::MalformedConfig) ? ErrorCategory::Malformed :
                     (r.status == StartStatus::Unsupported) ? ErrorCategory::Unsupported : ErrorCategory::Network;
-    beginStop((r.status == StartStatus::Unsupported || r.status == StartStatus::MalformedConfig)
-                  ? StopPurpose::Finish : StopPurpose::Retry, pendingError_);
+    failPath(pendingError_, r.status == StartStatus::Unsupported || r.status == StartStatus::MalformedConfig);
 }
 
 bool Coordinator::proofMatches(const OwnTunnelProof& p, const std::string& nonce,
@@ -252,10 +330,23 @@ bool Coordinator::proofMatches(const OwnTunnelProof& p, const std::string& nonce
            (p.handshakeAt >= started || (p.adoptedLiveSession && now - p.handshakeAt <= 180000)) &&
            std::find(candidate.expectedEgressIps.begin(), candidate.expectedEgressIps.end(), p.observedEgressIp) != candidate.expectedEgressIps.end();
 }
+bool Coordinator::xrayProofMatches(const OwnTunnelProof& p, const std::string& nonce, const Candidate& candidate,
+                                   const std::string& pathId, Millis pathStarted, Millis now) {
+    // No peer telemetry exists for Xray: only the probe through this path's own tunnel
+    // interface, started after this path started, proves it (nonce, TLS, expected egress).
+    return p.certificateValid && p.nonceMatched && p.nonce == nonce && !nonce.empty() &&
+           !pathId.empty() && p.pathId == pathId && p.interfaceBound &&
+           p.probeStartedAt >= pathStarted && p.probeStartedAt <= now && !p.peerHandshakeObserved &&
+           std::find(candidate.expectedEgressIps.begin(), candidate.expectedEgressIps.end(), p.observedEgressIp) != candidate.expectedEgressIps.end();
+}
 void Coordinator::onProof(CycleId c, AttemptId a, ProofResult p) {
     if (!current(c, a) || status_.state != State::Verifying) return;
-    if (clock_.now() >= phaseDeadline_ || !p.probeSucceeded || !proofMatches(p.evidence, nonce_, currentCandidate_, attemptStarted_, clock_.now())) {
-        beginStop(StopPurpose::Retry, clock_.now() >= phaseDeadline_ ? ErrorCategory::Deadline : ErrorCategory::ProofFailed); return;
+    const auto path = currentPath();
+    const bool matches = path.kind == PathKind::Xray
+        ? xrayProofMatches(p.evidence, nonce_, currentCandidate_, path.id, pathStarted_, clock_.now())
+        : proofMatches(p.evidence, nonce_, currentCandidate_, pathStarted_, clock_.now());
+    if (clock_.now() >= phaseDeadline_ || !p.probeSucceeded || !matches) {
+        failPath(clock_.now() >= phaseDeadline_ ? ErrorCategory::Deadline : ErrorCategory::ProofFailed, false); return;
     }
     if (!publish(State::Connected).valid()) return;
     const auto candidateId = currentCandidate_.id;
@@ -280,6 +371,10 @@ void Coordinator::finishReleased() {
 
 void Coordinator::releaseThen(StopPurpose purpose, ErrorCategory error) {
     stopPurpose_ = purpose; pendingError_ = error;
+    if (purpose == StopPurpose::NextPath && !restartAfterStop_) {
+        // The previous path is confirmed down: the same allocation goes on with the next path.
+        ++pathIndex_; startPath(); return;
+    }
     if (!allocationOwner_) { finishReleased(); return; }
     const auto lease = allocationOwner_;
     if (lease->releaseRequested) return; // an existing release owns completion
@@ -310,20 +405,31 @@ void Coordinator::beginStop(StopPurpose purpose, ErrorCategory error, std::share
     const bool connected = status_.state == State::Connected;
     backendMayBeRunning_ = false; // commit one scoped stop before notification
     stopPurpose_ = purpose; pendingError_ = error;
-    phaseDeadline_ = (purpose == StopPurpose::Cancel || connected || !overallDeadline_) ? clock_.now() + 3000 :
-        std::min(overallDeadline_ ? overallDeadline_ : clock_.now() + 8000, clock_.now() + 3000);
+    // Every stop gets its own bounded time: a selection deadline that already passed must not
+    // turn a normal stop into "stop unconfirmed". The next selection step re-checks it.
+    (void)connected;
+    phaseDeadline_ = clock_.now() + timing().stopMs;
     const auto deadline = phaseDeadline_;
     std::weak_ptr<CallbackGate> weak = callbackGate_;
+    ++pathSeq_; // the stopped path's start/proof ingress is closed
+    status_.switchingPath = purpose == StopPurpose::NextPath;
     const auto token = publish(State::Stopping, error);
     // These scoped cleanup effects remain valid independently of token/owner.
     // The old completion ingress is already closed before either external call.
     if (unusedAdmission && !unusedAdmission->backendClaimed) unusedAdmission->release();
     adapter->cancelOwned(c, a);
     if (stop && lease) {
-        adapter->stopAndConfirm(lease->cycle, lease->attempt, deadline, [weak, lease](CycleId x, AttemptId y, StopResult r) {
+        adapter->stopAndConfirm(lease->cycle, lease->attempt, deadline, [weak, lease, purpose](CycleId x, AttemptId y, StopResult r) {
             if (x != lease->cycle || y != lease->attempt) return;
-            if (auto gate = weak.lock(); gate && gate->owner) gate->owner->onStop(x, y, r);
-            if (r.confirmedDisconnected) lease->release();
+            auto gate = weak.lock();
+            const bool owned = gate && gate->owner;
+            if (owned) gate->owner->onStop(x, y, r);
+            // A path switch keeps the allocation for the next path. It is released here only
+            // when no live owner continues with it (destroyed, failed or cancelled meanwhile).
+            const bool continues = purpose == StopPurpose::NextPath && gate && gate->owner &&
+                gate->owner->allocationOwner_ == lease && gate->owner->status_.state != State::Failed &&
+                gate->owner->status_.state != State::Cancelled;
+            if (r.confirmedDisconnected && !continues) lease->release();
         });
     } else if (token.valid()) {
         auto* owner = token.gate->owner;
@@ -336,7 +442,7 @@ void Coordinator::onStop(CycleId c, AttemptId a, StopResult r) {
     releaseThen(stopPurpose_, pendingError_);
 }
 void Coordinator::fail(ErrorCategory e) {
-    status_.candidateId.clear(); publish(State::Failed, e);
+    status_.candidateId.clear(); status_.pathId.clear(); status_.switchingPath = false; publish(State::Failed, e);
 }
 
 void Coordinator::cancel() {
@@ -349,6 +455,7 @@ void Coordinator::cancel() {
 void Coordinator::cancelCurrent() {
     if (status_.state == State::Stopping) {
         stopPurpose_ = StopPurpose::Cancel; pendingError_ = ErrorCategory::Cancelled;
+        if (status_.switchingPath) { status_.switchingPath = false; publish(State::Stopping, status_.error); }
         return; // the committed stop/release remains mandatory
     }
     beginStop(StopPurpose::Cancel, ErrorCategory::Cancelled);
@@ -361,8 +468,15 @@ void Coordinator::tick() {
         adapter->cancelOwned(c, a); // scoped cleanup; no continuation
         return;
     }
-    if ((status_.state == State::Admitting || status_.state == State::Starting || status_.state == State::Verifying) && clock_.now() >= phaseDeadline_) {
+    if (status_.state == State::Racing && clock_.now() >= phaseDeadline_) {
+        // Nothing answered in time: the Xray paths of this allocation are dropped.
+        onRace(status_.cycle, status_.attempt, pathSeq_, RaceResult{true, {}});
+        return;
+    }
+    if (status_.state == State::Admitting && clock_.now() >= phaseDeadline_) {
         beginStop(StopPurpose::Retry, ErrorCategory::Deadline);
+    } else if ((status_.state == State::Starting || status_.state == State::Verifying) && clock_.now() >= phaseDeadline_) {
+        failPath(ErrorCategory::Deadline, false);
     } else if (status_.state == State::Stopping && clock_.now() >= phaseDeadline_) fail(ErrorCategory::StopUnconfirmed);
 }
 

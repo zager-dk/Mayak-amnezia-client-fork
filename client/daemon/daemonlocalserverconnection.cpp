@@ -152,6 +152,16 @@ void DaemonLocalServerConnection::parseCommand(const QByteArray& data) {
         {"requestId", request}, {"stopped", stopped}});
     return;
   }
+  // Mayak: the app found its own Xray tunnel left by an ended app process. Ends only tun2socks
+  // started from this installation's tun2socks.exe.
+  if (type == "mayakStopXrayLeftover") {
+    const QString request = obj.value("requestId").toString();
+    if (request.size() != 64) return;
+    const int stopped = MayakForeignVpnStop::stopOwnTun2Socks();
+    write(QJsonObject{{"type", "mayakXrayLeftoverStopped"}, {"owner", "MayakVpnAwgLifecycleV1"},
+        {"requestId", request}, {"stopped", stopped}});
+    return;
+  }
 #endif
 
   if (type == "deactivate") {

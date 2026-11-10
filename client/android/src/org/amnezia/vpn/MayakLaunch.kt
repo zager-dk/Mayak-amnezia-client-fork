@@ -41,6 +41,17 @@ object MayakLaunch {
     // never acts on a stale config type (note 13).
     private const val MANAGED_MARKER = "mayak_managed_config"
 
+    // Mayak Xray path: "1" while a managed Xray session may run in XrayService (written by the
+    // service process, read by a cold-started app to inspect the right service).
+    private const val MANAGED_XRAY_MARKER = "mayak_managed_xray"
+
+    fun markManagedXray(context: Context, active: Boolean) {
+        runCatching { java.io.File(context.noBackupFilesDir, MANAGED_XRAY_MARKER).writeText(if (active) "1" else "0") }
+    }
+
+    fun isManagedXrayActive(context: Context): Boolean =
+        runCatching { java.io.File(context.noBackupFilesDir, MANAGED_XRAY_MARKER).readText().trim() == "1" }.getOrDefault(false)
+
     fun markManagedConfig(context: Context, managed: Boolean) {
         runCatching { java.io.File(context.noBackupFilesDir, MANAGED_MARKER).writeText(if (managed) "1" else "0") }
     }

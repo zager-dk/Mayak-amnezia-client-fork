@@ -54,6 +54,13 @@ public:
     bool isConnected() const;
     void setConnectionState(Vpn::ConnectionState state);
 
+    // Mayak Xray path: the vpn configuration of an admitted amnezia-xray container (decoded
+    // xray_paths entry) with the managed server's DNS and local settings. Nothing is stored.
+    amnezia::ErrorCode prepareMayakXrayConnection(const QString &serverId, const QJsonObject &xrayRoot,
+                                                  QJsonObject &vpnConfiguration);
+    // Rule 5: xray writes every destination to its access log unless told not to (an empty
+    // "access" means stdout). Forces log.access="none" and no DNS log in a prepared Xray config.
+    static void disableXrayAccessLog(QJsonObject &vpnConfiguration);
     QJsonObject createConnectionConfiguration(const QPair<QString, QString> &dns,
                                              bool isApiConfig,
                                              const QString &hostName,
@@ -87,6 +94,14 @@ signals:
 
 private:
     ErrorCode defaultContainerForServer(const QString &serverId, DockerContainer &container) const;
+    // Rule 4 for a manually imported Xray config (not a Mayak server): the fork reports
+    // "Connected" as soon as tun2socks runs. Mayak shows "Connecting" until a probe through
+    // the Xray interface reaches the expected egress (the server's own IPv4).
+    void legacyXrayState(Vpn::ConnectionState state);
+    void probeLegacyXray(quint64 generation, int attempt);
+    QString m_legacyXrayEgress;   // empty: the legacy connection is not Xray
+    quint64 m_legacyXrayGeneration = 0;
+    bool m_legacyXrayProven = false;
 
     SecureServersRepository* m_serversRepository;
     SecureAppSettingsRepository* m_appSettingsRepository;

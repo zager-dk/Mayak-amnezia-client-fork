@@ -33,6 +33,10 @@ add_executable(test_mayak_runtime testMayakRuntime.cpp)
 target_link_libraries(test_mayak_runtime PRIVATE Qt6::Test test_common)
 add_test(NAME MayakRuntimeTest COMMAND test_mayak_runtime)
 
+add_executable(test_mayak_xray_paths testMayakXrayPaths.cpp)
+target_link_libraries(test_mayak_xray_paths PRIVATE Qt6::Test test_common)
+add_test(NAME MayakXrayPathsTest COMMAND test_mayak_xray_paths)
+
 add_executable(test_mayak_split_tunneling testMayakSplitTunneling.cpp)
 target_link_libraries(test_mayak_split_tunneling PRIVATE Qt6::Test test_common)
 add_test(NAME MayakSplitTunnelingTest COMMAND test_mayak_split_tunneling)

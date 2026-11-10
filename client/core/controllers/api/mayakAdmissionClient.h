@@ -39,6 +39,21 @@ struct AdmissionError {
     bool terminal = false;
 };
 
+// One Xray path to the SAME exit as the AWG allocation (server field xray_paths, schema 1).
+// Shape only; the config is bound to the candidate host by decodeXrayPathConfig().
+struct XrayPath {
+    QString id;            // "xray-<fingerprint>"
+    QString fingerprint;   // uTLS fingerprint of this path
+    QString encodedConfig; // vpn:// key with exactly one amnezia-xray container
+};
+
+// Validated content of one path, bound to the admitted candidate host.
+struct XrayPathConfig {
+    QJsonObject root;       // decoded vpn:// root (config_version 2)
+    QJsonObject container;  // the single amnezia-xray container
+    QJsonObject clientJson; // parsed last_config (xray client JSON)
+};
+
 struct AcquireResponse {
     QString allocationId;
     QDateTime connectBefore;
@@ -48,6 +63,11 @@ struct AcquireResponse {
     // affect validation of the VPN allocation/configuration above.
     QString exitLocationCandidateId;
     QString exitLocationCityId;
+    // Optional Xray paths (request field mayak_paths=1). A malformed list never invalidates the
+    // AWG allocation above: it is dropped and xrayPathsRejected tells why (for the log only).
+    QList<XrayPath> xrayPaths;
+    bool xrayPathsOffered = false;
+    QString xrayPathsRejected;
 };
 
 struct Response {
@@ -77,6 +97,8 @@ struct Request {
     // Idempotent re-acquire of an existing allocation (cold-start adoption): the server returns
     // that allocation's original connect_before, which may already be in the past.
     bool resumeAllocation = false;
+    // acquire only: ask for the Xray paths of the same exit (mayak_paths=1).
+    bool requestPaths = false;
 };
 
 using Transport = std::function<QFuture<GatewayPostResult>(const QString &, const QJsonObject &, int)>;
@@ -87,6 +109,12 @@ bool parseConnectionCapability(const QByteArray &responseBody, const QDateTime &
                                QString *failure = nullptr);
 bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, QString *failure = nullptr,
                           bool allowPastConnectBefore = false);
+// Strict shape of xray_paths: schema 1, 1..4 unique paths, id "xray-<fp>", known fingerprint, vpn:// config.
+bool parseXrayPaths(const QJsonValue &value, QList<XrayPath> *out, QString *failure = nullptr);
+// Decodes one path and checks it targets exactly candidateHost with the path's fingerprint.
+bool decodeXrayPathConfig(const XrayPath &path, const QString &candidateHost, XrayPathConfig *out,
+                          QString *failure = nullptr);
+bool isKnownXrayFingerprint(const QString &fingerprint);
 bool parseAdmissionError(const QByteArray &responseBody, bool trustedEncryptedResponse, AdmissionError *out);
 bool isValidAttemptId(const QString &attemptId);
 QJsonObject buildPayload(const Request &request, bool *valid = nullptr);

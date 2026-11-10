@@ -89,6 +89,15 @@ protected:
 private:
     struct ManagedBackend;
     std::shared_ptr<ManagedBackend> m_managedBackend;
+#ifdef AMNEZIA_DESKTOP
+    // Mayak Xray path (Windows/desktop): the fork's XrayProtocol under the managed lifecycle.
+    void launchMayakXray(std::shared_ptr<ManagedBackend> s, MayakBackendBridge::Ticket t, QJsonObject config,
+                         qint64 deadline, MayakBackendBridge::Done done);
+    void stopMayakXray(std::shared_ptr<ManagedBackend> s, std::function<void(QString, QString, bool)> finish,
+                       QString nonce, QString context, qint64 deadline);
+    // A Mayak Xray tunnel left by an ended process (interface 10.33.0.2): stopped before inspection.
+    bool cleanupMayakXrayLeftover();
+#endif
     SecureServersRepository* m_serversRepository;
     SecureAppSettingsRepository* m_appSettingsRepository;
 

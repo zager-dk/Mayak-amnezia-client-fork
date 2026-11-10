@@ -219,6 +219,109 @@ bool parseAcquireResponse(const QByteArray &responseBody, AcquireResponse *out, 
             }
         }
     }
+    if (obj.contains(QStringLiteral("xray_paths"))) {
+        out->xrayPathsOffered = true;
+        QString reason;
+        if (!parseXrayPaths(obj.value(QStringLiteral("xray_paths")), &out->xrayPaths, &reason)) {
+            out->xrayPaths.clear();
+            out->xrayPathsRejected = reason;
+        }
+    }
+    return true;
+}
+
+bool isKnownXrayFingerprint(const QString &fingerprint)
+{
+    // Same list as the service (ClusterService.ClientFingerprints).
+    static const QSet<QString> known{QStringLiteral("chrome"), QStringLiteral("firefox"), QStringLiteral("safari"),
+        QStringLiteral("ios"), QStringLiteral("android"), QStringLiteral("edge"), QStringLiteral("random"),
+        QStringLiteral("randomized")};
+    return known.contains(fingerprint);
+}
+
+bool parseXrayPaths(const QJsonValue &value, QList<XrayPath> *out, QString *failure)
+{
+    auto fail = [failure](const QString &reason) { if (failure) *failure = reason; return false; };
+    if (!out) return fail(QStringLiteral("no output"));
+    out->clear();
+    if (!value.isObject()) return fail(QStringLiteral("xray_paths is not an object"));
+    const QJsonObject obj = value.toObject();
+    const QJsonValue schema = obj.value(QStringLiteral("schema"));
+    if (!schema.isDouble() || schema.toDouble() != 1.0) return fail(QStringLiteral("unsupported xray_paths schema"));
+    const QJsonValue pathsValue = obj.value(QStringLiteral("paths"));
+    if (!pathsValue.isArray() || pathsValue.toArray().isEmpty() || pathsValue.toArray().size() > 4)
+        return fail(QStringLiteral("invalid xray path list"));
+    QSet<QString> ids;
+    QList<XrayPath> paths;
+    for (const QJsonValue &item : pathsValue.toArray()) {
+        if (!item.isObject()) return fail(QStringLiteral("invalid xray path"));
+        const QJsonObject p = item.toObject();
+        XrayPath path;
+        if (!boundedString(p.value(QStringLiteral("id")), 32, &path.id)
+            || !boundedString(p.value(QStringLiteral("fingerprint")), 16, &path.fingerprint)
+            || !isKnownXrayFingerprint(path.fingerprint) || path.id != QStringLiteral("xray-") + path.fingerprint)
+            return fail(QStringLiteral("invalid xray path id or fingerprint"));
+        if (ids.contains(path.id)) return fail(QStringLiteral("duplicate xray path"));
+        ids.insert(path.id);
+        if (!boundedString(p.value(QStringLiteral("config")), 32768, &path.encodedConfig)
+            || !path.encodedConfig.startsWith(QStringLiteral("vpn://")))
+            return fail(QStringLiteral("invalid xray path config"));
+        paths.push_back(path);
+    }
+    *out = paths;
+    return true;
+}
+
+bool decodeXrayPathConfig(const XrayPath &path, const QString &candidateHost, XrayPathConfig *out, QString *failure)
+{
+    auto fail = [failure](const QString &reason) { if (failure) *failure = reason; return false; };
+    if (!out || candidateHost.isEmpty() || !isKnownXrayFingerprint(path.fingerprint)
+        || !path.encodedConfig.startsWith(QStringLiteral("vpn://"))) return fail(QStringLiteral("invalid input"));
+    const QByteArray compressed = QByteArray::fromBase64(path.encodedConfig.mid(6).toUtf8(),
+        QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals);
+    if (compressed.isEmpty()) return fail(QStringLiteral("empty key"));
+    const QByteArray json = qUncompress(compressed);
+    if (json.isEmpty() || json.size() > maxBodyBytes) return fail(QStringLiteral("key does not decompress"));
+    QJsonObject root;
+    if (!parseObject(json, &root)) return fail(QStringLiteral("key is not a JSON object"));
+    if (!root.value(QStringLiteral("config_version")).isDouble() || root.value(QStringLiteral("config_version")).toDouble() != 2.0)
+        return fail(QStringLiteral("unsupported config_version"));
+    if (root.value(QStringLiteral("hostName")).toString() != candidateHost) return fail(QStringLiteral("host mismatch"));
+    if (root.value(QStringLiteral("defaultContainer")).toString() != QStringLiteral("amnezia-xray"))
+        return fail(QStringLiteral("default container is not amnezia-xray"));
+    const QJsonValue containers = root.value(QStringLiteral("containers"));
+    if (!containers.isArray() || containers.toArray().size() != 1 || !containers.toArray().first().isObject())
+        return fail(QStringLiteral("expected exactly one container"));
+    const QJsonObject container = containers.toArray().first().toObject();
+    if (container.value(QStringLiteral("container")).toString() != QStringLiteral("amnezia-xray")
+        || !container.value(QStringLiteral("xray")).isObject()) return fail(QStringLiteral("container is not amnezia-xray"));
+    const QJsonObject xray = container.value(QStringLiteral("xray")).toObject();
+    if (xray.value(QStringLiteral("xray_fingerprint")).toString() != path.fingerprint)
+        return fail(QStringLiteral("container fingerprint mismatch"));
+    QJsonObject client;
+    if (!xray.value(QStringLiteral("last_config")).isString()
+        || !parseObject(xray.value(QStringLiteral("last_config")).toString().toUtf8(), &client))
+        return fail(QStringLiteral("invalid last_config"));
+    const QJsonValue outbounds = client.value(QStringLiteral("outbounds"));
+    if (!outbounds.isArray() || outbounds.toArray().size() != 1 || !outbounds.toArray().first().isObject())
+        return fail(QStringLiteral("expected exactly one outbound"));
+    const QJsonObject outbound = outbounds.toArray().first().toObject();
+    if (outbound.value(QStringLiteral("protocol")).toString() != QStringLiteral("vless")) return fail(QStringLiteral("outbound is not vless"));
+    const QJsonArray vnext = outbound.value(QStringLiteral("settings")).toObject().value(QStringLiteral("vnext")).toArray();
+    if (vnext.size() != 1 || vnext.first().toObject().value(QStringLiteral("address")).toString() != candidateHost)
+        return fail(QStringLiteral("outbound host mismatch"));
+    const int port = vnext.first().toObject().value(QStringLiteral("port")).toInt(0);
+    if (port < 1 || port > 65535) return fail(QStringLiteral("invalid outbound port"));
+    const QJsonObject stream = outbound.value(QStringLiteral("streamSettings")).toObject();
+    if (stream.value(QStringLiteral("security")).toString() != QStringLiteral("reality")
+        || stream.value(QStringLiteral("realitySettings")).toObject().value(QStringLiteral("fingerprint")).toString() != path.fingerprint)
+        return fail(QStringLiteral("outbound is not reality with the path fingerprint"));
+    bool socks = false;
+    for (const QJsonValue &inbound : client.value(QStringLiteral("inbounds")).toArray())
+        if (inbound.toObject().value(QStringLiteral("protocol")).toString() == QStringLiteral("socks")
+            && inbound.toObject().value(QStringLiteral("listen")).toString() == QStringLiteral("127.0.0.1")) socks = true;
+    if (!socks) return fail(QStringLiteral("no local socks inbound"));
+    out->root = root; out->container = container; out->clientJson = client;
     return true;
 }
 
@@ -272,11 +375,13 @@ QJsonObject buildPayload(const Request &request, bool *valid)
     payload.remove(QStringLiteral("candidate_id"));
     payload.remove(QStringLiteral("allocation_id"));
     payload.remove(QStringLiteral("mayak_exit_location"));
+    payload.remove(QStringLiteral("mayak_paths"));
     payload.insert(QStringLiteral("action"), request.action);
     payload.insert(QStringLiteral("attempt_id"), request.attemptId);
     if (request.action == QStringLiteral("acquire")) {
         payload.insert(QStringLiteral("candidate_id"), request.candidateId);
         payload.insert(QStringLiteral("mayak_exit_location"), 1);
+        if (request.requestPaths) payload.insert(QStringLiteral("mayak_paths"), 1);
     }
     if (request.action == QStringLiteral("proven") || request.action == QStringLiteral("release"))
         payload.insert(QStringLiteral("allocation_id"), request.allocationId);

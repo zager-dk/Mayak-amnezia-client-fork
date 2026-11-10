@@ -51,6 +51,7 @@ import org.amnezia.vpn.protocol.ProtocolState.UNKNOWN
 import org.amnezia.vpn.protocol.VpnException
 import org.amnezia.vpn.protocol.VpnStartException
 import org.amnezia.vpn.protocol.wireguard.Wireguard
+import org.amnezia.vpn.protocol.xray.Xray
 import org.amnezia.vpn.protocol.putStatus
 import org.amnezia.vpn.util.LoadLibraryException
 import org.amnezia.vpn.util.Log
@@ -70,6 +71,9 @@ const val MSG_ERROR = "ERROR"
 const val MSG_SAVE_LOGS = "SAVE_LOGS"
 const val MSG_CLIENT_NAME = "CLIENT_NAME"
 const val MSG_AWG_TUNNEL_HEALTH = "AWG_TUNNEL_HEALTH"
+// Mayak Xray path health: Xray.kt's VPN address (XrayConfig.DEFAULT_IPV4_ADDRESS) and a fixed peer tag.
+private const val XRAY_LOCAL_ADDRESS = "10.0.42.2"
+private const val XRAY_HEALTH_PEER = "78726179"
 const val MSG_MANAGED_RESULT = "MANAGED_RESULT"
 const val MSG_MANAGED_TICKET = "MANAGED_TICKET"
 const val MSG_HEALTH_CONTEXT_ID = "HEALTH_CONTEXT_ID"
@@ -606,6 +610,53 @@ open class AmneziaVpnService : VpnService() {
         }
     }
 
+    /**
+     * Mayak Xray path: there is no peer telemetry. The owner's proof needs this tunnel's own
+     * interface identity (name + address) for a probe bound to it; counters are not available.
+     */
+    @MainThread
+    private fun launchXrayHealthSending(config: JSONObject) {
+        stopAwgHealthSending()
+        val endpoint = xrayEndpoint(config) ?: return
+        awgHealthSendingJob = mainScope.launch {
+            while (isActive && protocolState.value !in setOf(DISCONNECTED, DISCONNECTING, RECONNECTING, UNKNOWN)) {
+                if (activeSession.protocol is Xray && (uiForeground || (managedStartedAt != 0L &&
+                        android.os.SystemClock.elapsedRealtime() - managedStartedAt < HIDDEN_CONNECT_HEALTH_MS))) {
+                    xrayInterfaceName()?.let { name ->
+                        val health = JSONObject().put("healthContextId", activeControlIdentity).put("generation", "1")
+                            .put("peerPublicKey", XRAY_HEALTH_PEER).put("endpoint", endpoint)
+                            .put("localAddress", "$XRAY_LOCAL_ADDRESS/30").put("interfaceName", name)
+                            .put("latestHandshakeEpochMs", "0").put("rxTotal", "0").put("txTotal", "0")
+                            .put("valid", activeControlIdentity.isNotBlank()).toString()
+                        clientMessengers.values
+                            .filter { it.name == ACTIVITY_MESSENGER_NAME }
+                            .forEach { messenger ->
+                                messenger.send {
+                                    ServiceEvent.AWG_HEALTH_UPDATE.packToMessage { putString(MSG_AWG_TUNNEL_HEALTH, health) }
+                                }
+                            }
+                    }
+                }
+                delay(STATUS_HEALTH_UPDATE_TIMEOUT)
+            }
+        }
+    }
+
+    private fun xrayEndpoint(config: JSONObject): String? = try {
+        val data = config.optJSONObject("xray_config_data") ?: return null
+        val vnext = JSONObject(data.optString("config")).getJSONArray("outbounds").getJSONObject(0)
+            .getJSONObject("settings").getJSONArray("vnext").getJSONObject(0)
+        val host = vnext.getString("address")
+        val port = vnext.getInt("port")
+        if (host.isBlank() || port <= 0) null else (if (host.contains(':')) "[$host]" else host) + ":" + port
+    } catch (_: Exception) { null }
+
+    private fun xrayInterfaceName(): String? = try {
+        java.net.NetworkInterface.getNetworkInterfaces()?.toList()?.firstOrNull { ni ->
+            ni.isUp && ni.inetAddresses.toList().any { it.hostAddress == XRAY_LOCAL_ADDRESS }
+        }?.name
+    } catch (_: Exception) { null }
+
     @MainThread
     private fun stopAwgHealthSending() {
         awgHealthSendingJob?.cancel()
@@ -672,6 +723,7 @@ open class AmneziaVpnService : VpnService() {
             return
         }
         activeManagedTicket = managedTicket
+        if (managedTicket.isNotBlank()) MayakLaunch.markManagedXray(this, protocol is Xray)
         stopWatchdog()
         backendReplacedWhileHidden = false
         underlyingLost = false
@@ -702,6 +754,9 @@ open class AmneziaVpnService : VpnService() {
             (protocol as? Wireguard)?.let { awg -> mainScope.launch {
                 if (session.source.isCurrent(activeSession.source)) launchAwgHealthSending(awg)
             } }
+            if (managedTicket.isNotBlank() && protocol is Xray) mainScope.launch {
+                if (session.source.isCurrent(activeSession.source)) launchXrayHealthSending(config)
+            }
         }
     }
 
@@ -710,6 +765,9 @@ open class AmneziaVpnService : VpnService() {
         managedStarts.invalidateAll()
         pendingVpnConfig = null
         stopAwgHealthSending()
+        // Mayak: an Xray session stopped outside the owner (revoke, notification) is no longer
+        // the managed backend a cold-started app must inspect.
+        if (activeSession.protocol is Xray) MayakLaunch.markManagedXray(this, false)
         if (isUnknown || isDisconnected || protocolState.value == DISCONNECTING) return
 
         Log.d(TAG, "Stop VPN connection")
@@ -795,7 +853,18 @@ open class AmneziaVpnService : VpnService() {
                     previousDisconnection?.join()
                     recoveryToFinish?.join() // never stop a backend while it is being replaced
                     if (session.source.isCurrent(activeSession.source) && identity == activeControlIdentity) {
-                        stopped = (session.protocol as? Wireguard)?.managedStopAndConfirm() == true
+                        stopped = when (val running = session.protocol) {
+                            is Wireguard -> running.managedStopAndConfirm()
+                            is Xray -> {
+                                // Down = the Xray tunnel interface is gone after the engine stop.
+                                running.stopVpn()
+                                var gone = xrayInterfaceName() == null
+                                while (!gone) { delay(100); gone = xrayInterfaceName() == null }
+                                if (gone) MayakLaunch.markManagedXray(this@AmneziaVpnService, false)
+                                gone
+                            }
+                            else -> false
+                        }
                         if (stopped) {
                             // Preserve the event's source owner even after control authority is reset.
                             session.source.state.value = DISCONNECTED
@@ -828,7 +897,10 @@ open class AmneziaVpnService : VpnService() {
                     if (connectionJob === connectionToCancel) connectionJob = null
                     if (!session.source.isCurrent(activeSession.source)) return@withTimeout
                     val protocol = session.protocol as? Wireguard
-                    ownState = if (protocol?.managedIsBackendOff() == true || (protocol == null && isUnknown)) "off"
+                    ownState = if (session.protocol is Xray) {
+                        val up = xrayInterfaceName() != null
+                        if (!up && activeControlIdentity.isBlank()) "off" else if (activeControlIdentity.isNotBlank()) "active" else "unknown"
+                    } else if (protocol?.managedIsBackendOff() == true || (protocol == null && isUnknown)) "off"
                         else if (activeControlIdentity.isNotBlank()) "active" else "unknown"
                 }
             } catch (_: Exception) { }

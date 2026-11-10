@@ -55,4 +55,9 @@ bool parseStopReply(const QByteArray& line, const QString& requestId, int* stopp
 void requestStop(QObject* ctx, std::function<void(bool replied, int stopped)> done,
                  int timeoutMs = 4000);
 
+// Mayak Xray path (Windows): asks the service to end tun2socks processes of this installation
+// (a tunnel left by an ended app). Blocking, bounded by timeoutMs. Returns the number ended, -1
+// when the service did not answer.
+int stopXrayLeftoverBlocking(int timeoutMs = 2000);
+
 }  // namespace mayak::foreignvpn

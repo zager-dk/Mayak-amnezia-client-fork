@@ -82,6 +82,12 @@ public:
         std::function<void(QObject*, std::function<void(bool)>)> observeVisibility;
         // Optional (Android): the service watchdog could not repair the current backend's exit.
         std::function<void(QObject*, std::function<void(Ticket)>)> observeFailover;
+        // Optional: the Xray path race engine. One xray process with one local SOCKS5 entry per
+        // path and NO tunnel and NO route change. raceStart(requestId, xray JSON, deadline,
+        // done(started)); raceStop(requestId, deadline, done(stopped)). A race never starts while
+        // a managed backend runs, and a managed start waits until the race engine is stopped.
+        std::function<void(QString, QJsonObject, Millis, std::function<void(bool)>)> raceStart;
+        std::function<void(QString, Millis, std::function<void(bool)>)> raceStop;
     };
     explicit MayakBackendBridge(Port port, QObject* parent = nullptr);
     ~MayakBackendBridge() override;
@@ -96,6 +102,9 @@ public:
     void recover(Ticket ticket, Millis deadline, Done done);
     bool canAdopt() const;
     void adopt(Ticket recovery, Ticket fresh, QString controlIdentity, QJsonObject config, Millis deadline, Done done);
+    bool canRace() const;
+    void raceStart(QString requestId, QJsonObject xrayConfig, Millis deadline, std::function<void(bool)> done);
+    void raceStop(QString requestId, Millis deadline, std::function<void(bool)> done);
     void preparePermissions(QString requestId, PermissionDone done);
     void cancelPermissionPreparation(const QString &requestId);
 signals:

@@ -5,9 +5,22 @@
 MayakRoutingUiController::MayakRoutingUiController(SecureAppSettingsRepository *settings, QObject *parent)
     : QObject(parent), m_settings(settings)
 {
-    if (m_settings)
+    if (m_settings) {
         connect(m_settings, &SecureAppSettingsRepository::mayakRussiaDirectEnabledChanged, this,
                 &MayakRoutingUiController::russiaDirectChanged);
+        connect(m_settings, &SecureAppSettingsRepository::mayakConnectionMethodChanged, this,
+                &MayakRoutingUiController::connectionMethodChanged);
+    }
+}
+
+QString MayakRoutingUiController::connectionMethod() const
+{
+    return m_settings ? m_settings->mayakConnectionMethod() : QStringLiteral("auto");
+}
+
+void MayakRoutingUiController::setConnectionMethod(const QString &method)
+{
+    if (m_settings) m_settings->setMayakConnectionMethod(method);
 }
 
 bool MayakRoutingUiController::russiaDirect() const

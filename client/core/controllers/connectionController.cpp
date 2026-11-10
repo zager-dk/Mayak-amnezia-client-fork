@@ -16,6 +16,12 @@
 #include "core/utils/protocolEnum.h"
 #include "core/models/containerConfig.h"
 #include "core/models/protocolConfig.h"
+#include "core/utils/mayakTunnelProbe.h"
+#include "core/utils/networkUtilities.h"
+#include "core/utils/constants/protocolConstants.h"
+#include <QNetworkInterface>
+#include <QTimer>
+#include <QUuid>
 
 using namespace amnezia;
 using namespace ProtocolUtils;
@@ -31,7 +37,7 @@ ConnectionController::ConnectionController(SecureServersRepository* serversRepos
 {
     if (!m_vpnConnection) return; // Injectable configuration-only test facade.
     connect(m_vpnConnection, &VpnConnection::connectionStateChanged, this, [this](Vpn::ConnectionState state) {
-        if (!m_managedActive) { m_effectiveState = state; emit connectionStateChanged(state); }
+        if (!m_managedActive) legacyXrayState(state);
     });
     connect(this, &ConnectionController::openConnectionRequested, m_vpnConnection, &VpnConnection::connectToVpn, Qt::QueuedConnection);
     connect(this, &ConnectionController::closeConnectionRequested, m_vpnConnection, &VpnConnection::disconnectFromVpn, Qt::QueuedConnection);
@@ -233,6 +239,45 @@ ErrorCode ConnectionController::prepareConnection(const QString &serverId,
     return ErrorCode::NoError;
 }
 
+ErrorCode ConnectionController::prepareMayakXrayConnection(const QString &serverId, const QJsonObject &xrayRoot,
+                                                          QJsonObject &vpnConfiguration)
+{
+    const auto managed = m_serversRepository->apiV2Config(serverId);
+    if (!managed.has_value()) return ErrorCode::InternalError;
+    const ApiV2ServerConfig admitted = ApiV2ServerConfig::fromJson(xrayRoot);
+    if (admitted.defaultContainer != DockerContainer::Xray || admitted.containers.size() != 1
+        || !admitted.containers.contains(DockerContainer::Xray) || admitted.hostName.isEmpty())
+        return ErrorCode::ApiConfigEmptyError;
+    const QPair<QString, QString> dns = managed->getDnsPair(m_appSettingsRepository->primaryDns(),
+                                                            m_appSettingsRepository->secondaryDns());
+    vpnConfiguration = createConnectionConfiguration(dns, true, admitted.hostName, managed->description,
+                                                     serverConfigUtils::ConfigSource::AmneziaGateway,
+                                                     admitted.containerConfig(DockerContainer::Xray), DockerContainer::Xray);
+    if (vpnConfiguration.isEmpty()) return ErrorCode::ApiConfigEmptyError;
+    disableXrayAccessLog(vpnConfiguration);
+    return ErrorCode::NoError;
+}
+
+void ConnectionController::disableXrayAccessLog(QJsonObject &vpnConfiguration)
+{
+    for (const QString key : {QStringLiteral("xray_config_data"), QStringLiteral("ssxray_config_data")}) {
+        if (!vpnConfiguration.value(key).isObject()) continue;
+        QJsonObject data = vpnConfiguration.value(key).toObject();
+        QJsonObject client = QJsonDocument::fromJson(data.value(configKey::config).toString().toUtf8()).object();
+        if (client.isEmpty()) continue;
+        QJsonObject log = client.value(QStringLiteral("log")).toObject();
+        log.insert(QStringLiteral("access"), QStringLiteral("none"));
+        log.insert(QStringLiteral("dnsLog"), false);
+        // info/debug also log destinations: never below "warning".
+        const QString level = log.value(QStringLiteral("loglevel")).toString().toLower(); // xray ignores case
+        if (level.isEmpty() || level == QStringLiteral("info") || level == QStringLiteral("debug"))
+            log.insert(QStringLiteral("loglevel"), QStringLiteral("warning"));
+        client.insert(QStringLiteral("log"), log);
+        data.insert(configKey::config, QString::fromUtf8(QJsonDocument(client).toJson(QJsonDocument::Compact)));
+        vpnConfiguration.insert(key, data);
+    }
+}
+
 ErrorCode ConnectionController::openConnection(const QString &serverId)
 {
     if (isMayakManaged(serverId)) { m_managedActive = true; m_mayak->begin(serverId); return ErrorCode::NoError; }
@@ -251,8 +296,76 @@ ErrorCode ConnectionController::openConnection(const QString &serverId)
         PayloadSender::sendAll(apiV2->sendPayload);
     }
 
+    ++m_legacyXrayGeneration; m_legacyXrayProven = false; m_legacyXrayEgress.clear();
+    if (container == DockerContainer::Xray || container == DockerContainer::SSXray) {
+        disableXrayAccessLog(vpnConfiguration); // rule 5 also for the user's own Xray configs
+        // "Only listed sites via VPN": the echo hosts are not routed through the tunnel, so the
+        // tunnel cannot be proven this way; the fork's behaviour is kept for that mode.
+        const bool onlyListedSites = m_appSettingsRepository->isSitesSplitTunnelingEnabled() &&
+            m_appSettingsRepository->routeMode() == amnezia::RouteMode::VpnOnlyForwardSites;
+        if (!onlyListedSites) m_legacyXrayEgress = QStringLiteral("any");
+    }
     emit openConnectionRequested(serverId, container, vpnConfiguration);
     return ErrorCode::NoError;
+}
+
+void ConnectionController::legacyXrayState(Vpn::ConnectionState state)
+{
+    if (state == Vpn::ConnectionState::Connected && !m_legacyXrayEgress.isEmpty() && !m_legacyXrayProven) {
+        // Started, not proven: keep showing "Connecting" and prove the tunnel first.
+        m_effectiveState = Vpn::ConnectionState::Connecting;
+        emit connectionStateChanged(m_effectiveState);
+        probeLegacyXray(++m_legacyXrayGeneration, 0);
+        return;
+    }
+    if (state != Vpn::ConnectionState::Connected) { ++m_legacyXrayGeneration; m_legacyXrayProven = false; }
+    m_effectiveState = state;
+    emit connectionStateChanged(state);
+}
+
+void ConnectionController::probeLegacyXray(quint64 generation, int attempt)
+{
+    if (generation != m_legacyXrayGeneration || m_managedActive) return;
+#ifdef Q_OS_ANDROID
+    const QString local = QStringLiteral("10.0.42.2");        // Xray.kt VPN address
+#else
+    const QString local = QString::fromLatin1(amnezia::protocols::xray::defaultLocalAddr); // XrayProtocol tun
+#endif
+    QString name;
+    for (const auto &iface : QNetworkInterface::allInterfaces())
+        for (const auto &entry : iface.addressEntries())
+            if (entry.ip().toString() == local) name = iface.name();
+    auto retryOrFail = [this, generation, attempt] {
+        if (generation != m_legacyXrayGeneration) return;
+        if (attempt < 3) {
+            QTimer::singleShot(4000, this, [this, generation, attempt] { probeLegacyXray(generation, attempt + 1); });
+            return;
+        }
+        qWarning().noquote() << "MayakNet event=legacy_xray_unproven";
+        ++m_legacyXrayGeneration;
+        m_effectiveState = Vpn::ConnectionState::Error;
+        emit connectionStateChanged(m_effectiveState);
+        emit closeConnectionRequested(); // never leave an unproven tunnel looking like VPN
+    };
+    if (name.isEmpty()) { retryOrFail(); return; }
+    auto *probe = new MayakTunnelProbe(this);
+    MayakTunnelProbeRequest request;
+    request.attemptTag = QStringLiteral("legacy-xray-%1").arg(generation);
+    request.localAddress = QHostAddress(local);
+    request.interfaceName = name;
+    request.acceptAnyPublicEgress = true; // the user's own server: its egress is not known
+    request.nonce = QUuid::createUuid().toString(QUuid::Id128);
+    request.deadlineMs = 8000;
+    connect(probe, &MayakTunnelProbe::finished, this, [this, probe, generation, retryOrFail](quint64, bool ok, MayakTunnelProbeProof, QString) {
+        probe->deleteLater();
+        if (generation != m_legacyXrayGeneration) return;
+        if (!ok) { retryOrFail(); return; }
+        qInfo().noquote() << "MayakNet event=legacy_xray_proven";
+        m_legacyXrayProven = true;
+        m_effectiveState = Vpn::ConnectionState::Connected;
+        emit connectionStateChanged(m_effectiveState);
+    });
+    probe->start(request);
 }
 
 void ConnectionController::closeConnection()

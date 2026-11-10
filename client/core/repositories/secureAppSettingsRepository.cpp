@@ -210,6 +210,20 @@ void SecureAppSettingsRepository::setSitesSplitTunnelingEnabled(bool enabled)
     emit sitesSplitTunnelingEnabledChanged(enabled);
 }
 
+QString SecureAppSettingsRepository::mayakConnectionMethod() const
+{
+    const QString method = value("Conf/mayakConnectionMethod", QStringLiteral("auto")).toString();
+    return method == QStringLiteral("awg") || method == QStringLiteral("xray") ? method : QStringLiteral("auto");
+}
+
+void SecureAppSettingsRepository::setMayakConnectionMethod(const QString &method)
+{
+    const QString normalized = method == QStringLiteral("awg") || method == QStringLiteral("xray") ? method : QStringLiteral("auto");
+    if (normalized == mayakConnectionMethod()) return;
+    setValue("Conf/mayakConnectionMethod", normalized);
+    emit mayakConnectionMethodChanged(normalized);
+}
+
 bool SecureAppSettingsRepository::isMayakRussiaDirectEnabled() const
 {
     return value("Conf/mayakRussiaDirect", true).toBool();

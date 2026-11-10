@@ -13,5 +13,8 @@ bool isKnownCore(const QString& imagePath);
 // Terminates every running known core and waits briefly for each to exit.
 // Returns the number of processes that exited.
 int stopKnownCores();
+// Mayak Xray path: ends tun2socks processes started from this installation's own tun2socks
+// executable (a tunnel left by an app that ended). Never touches any other program.
+int stopOwnTun2Socks();
 
 }  // namespace MayakForeignVpnStop

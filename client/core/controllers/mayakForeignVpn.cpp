@@ -5,6 +5,7 @@
 #include <QLocalSocket>
 #include <QRandomGenerator>
 #include <QTimer>
+#include <QElapsedTimer>
 #include <memory>
 
 #ifdef Q_OS_WINDOWS
@@ -203,6 +204,40 @@ void requestStop(QObject* ctx, std::function<void(bool, int)> done, int timeoutM
     QObject::connect(timer, &QTimer::timeout, socket, [finish] { finish(false, 0); });
     timer->start(timeoutMs);
     socket->connectToServer(QLatin1String(kDaemonPipe));
+#endif
+}
+
+int stopXrayLeftoverBlocking(int timeoutMs) {
+#ifndef Q_OS_WINDOWS
+    Q_UNUSED(timeoutMs);
+    return -1;
+#else
+    QByteArray raw(32, Qt::Uninitialized);
+    QRandomGenerator::system()->generate(reinterpret_cast<quint32*>(raw.data()),
+                                         reinterpret_cast<quint32*>(raw.data() + raw.size()));
+    const QString id = QString::fromLatin1(raw.toHex());
+    QLocalSocket socket;
+    socket.connectToServer(QLatin1String(kDaemonPipe));
+    if (!socket.waitForConnected(timeoutMs)) return -1;
+    socket.write(QJsonDocument(QJsonObject{{QStringLiteral("type"), QStringLiteral("mayakStopXrayLeftover")},
+        {QStringLiteral("requestId"), id}}).toJson(QJsonDocument::Compact) + '\n');
+    socket.flush();
+    QByteArray buffer;
+    QElapsedTimer elapsed; elapsed.start();
+    while (elapsed.elapsed() < timeoutMs && socket.waitForReadyRead(int(qMax<qint64>(1, timeoutMs - elapsed.elapsed())))) {
+        buffer.append(socket.readAll());
+        for (qsizetype pos; (pos = buffer.indexOf('\n')) >= 0;) {
+            const auto doc = QJsonDocument::fromJson(buffer.left(pos).trimmed());
+            buffer.remove(0, pos + 1);
+            const auto obj = doc.object();
+            if (obj.value(QStringLiteral("type")).toString() == QStringLiteral("mayakXrayLeftoverStopped") &&
+                obj.value(QStringLiteral("owner")).toString() == QLatin1String(kOwner) &&
+                obj.value(QStringLiteral("requestId")).toString() == id && obj.value(QStringLiteral("stopped")).isDouble())
+                return qMax(0, obj.value(QStringLiteral("stopped")).toInt());
+        }
+        if (buffer.size() > 64 * 1024) return -1;
+    }
+    return -1;
 #endif
 }
 

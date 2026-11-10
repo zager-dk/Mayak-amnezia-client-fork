@@ -1193,6 +1193,17 @@ class AmneziaActivity : QtActivity() {
         managedStarts.invalidateAll()
         mainScope.launch {
             val msg = Action.MANAGED_INSPECT.packToMessage { putString("inspectRequestId", request) }
+            // Mayak: a managed backend runs either in AwgService or in XrayService. Ask the one
+            // the service marked, even if another one was bound last (cold start).
+            val wanted = if (MayakLaunch.isManagedXrayActive(this@AmneziaActivity)) VpnProto.XRAY else VpnProto.AWG
+            // Never re-route already queued managed requests (e.g. a stop for the other service).
+            if (vpnProto?.serviceClass != wanted.serviceClass && pendingManagedMessages.isEmpty()) {
+                if (isServiceConnected || isInBoundState) doUnbindService()
+                vpnProto = wanted
+                pendingManagedMessages.add(msg)
+                doBindService(createIfMissing = true)
+                return@launch
+            }
             if (isServiceConnected) vpnServiceMessenger.send(msg, activityMessenger)
             else {
                 pendingManagedMessages.add(msg)

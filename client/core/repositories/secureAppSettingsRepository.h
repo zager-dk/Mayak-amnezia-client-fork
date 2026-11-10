@@ -59,6 +59,9 @@ public:
 
     // Mayak «Россия напрямую»: on by default until the user chooses; the choice is stored and
     // survives updates (only a missing key means "not chosen yet").
+    // Mayak 5.1.0.21: "auto" (AWG, then Xray paths), "awg" or "xray" (owner checks).
+    QString mayakConnectionMethod() const;
+    void setMayakConnectionMethod(const QString &method);
     bool isMayakRussiaDirectEnabled() const;
     void setMayakRussiaDirectEnabled(bool enabled);
     bool isMayakRussiaDirectNoticeShown() const;
@@ -141,6 +144,7 @@ signals:
     void sitesSplitTunnelingEnabledChanged(bool enabled);
     void appsSplitTunnelingEnabledChanged(bool enabled);
     void mayakRussiaDirectEnabledChanged(bool enabled);
+    void mayakConnectionMethodChanged(const QString &method);
     void useAmneziaDnsChanged(bool enabled);
     void saveLogsChanged(bool enabled);
     void screenshotsEnabledChanged(bool enabled);

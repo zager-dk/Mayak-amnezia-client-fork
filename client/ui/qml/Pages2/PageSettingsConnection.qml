@@ -44,6 +44,51 @@ PageType {
 
                 spacing: 0
 
+                // Mayak 5.1.0.21: how Mayak reaches the server. Applies from the next connect.
+                Text {
+                    Layout.fillWidth: true
+                    Layout.topMargin: 8
+                    Layout.bottomMargin: 4
+                    text: qsTr("Способ подключения")
+                    color: AmneziaStyle.color.mayakInk
+                    font.family: AmneziaStyle.uiFontFamily
+                    font.pixelSize: 16
+                    font.weight: Font.DemiBold
+                    wrapMode: Text.WordWrap
+                }
+                Repeater {
+                    model: [
+                        { method: "auto", title: qsTr("Автоматически"),
+                          subtitle: qsTr("Сначала AWG, если он не проходит — Xray. Рекомендуется") },
+                        { method: "awg", title: qsTr("Только AWG"),
+                          subtitle: qsTr("Самый быстрый способ, но в некоторых сетях не работает") },
+                        { method: "xray", title: qsTr("Только Xray"),
+                          subtitle: Qt.platform.os === "windows"
+                                    ? qsTr("Медленнее AWG. Исключения программ на Windows не действуют")
+                                    : qsTr("Медленнее AWG, но проходит там, где AWG не работает") }
+                    ]
+                    delegate: ListItemType {
+                        required property var modelData
+                        Layout.fillWidth: true
+                        objectName: "mayak-connection-method-" + modelData.method
+                        text: modelData.title
+                        subtitle: modelData.subtitle
+                        trailingIconSource: MayakRouting.connectionMethod === modelData.method ? "qrc:/images/controls/check.svg" : ""
+                        Accessible.name: modelData.title + (MayakRouting.connectionMethod === modelData.method ? qsTr(", выбрано") : "")
+                        onClicked: MayakRouting.connectionMethod = modelData.method
+                    }
+                }
+                Text {
+                    Layout.fillWidth: true
+                    Layout.bottomMargin: 12
+                    text: qsTr("Новый способ применится при следующем подключении.")
+                    color: AmneziaStyle.color.mayakInk
+                    opacity: 0.7
+                    font.family: AmneziaStyle.uiFontFamily
+                    font.pixelSize: 13
+                    wrapMode: Text.WordWrap
+                }
+
                 ListItemType {
                     id: amneziaDnsRow
 

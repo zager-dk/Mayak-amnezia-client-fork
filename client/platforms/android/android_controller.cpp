@@ -1,4 +1,5 @@
 #include <QJniEnvironment>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QQmlFile>
 #include <QEventLoop>
@@ -159,6 +160,17 @@ ErrorCode AndroidController::start(const QJsonObject &vpnConfig)
     QString host = peer.value("hostName").toString();
     QHostAddress numericHost;
     if (numericHost.setAddress(host)) host = numericHost.toString();
+    if (protocol == QStringLiteral("xray")) {
+        // Mayak Xray path: no peer key; the service reports this fixed tag and the outbound
+        // endpoint of the xray client config (see AmneziaVpnService.launchXrayHealthSending).
+        const QJsonObject vnext = QJsonDocument::fromJson(peer.value("config").toString().toUtf8()).object()
+            .value("outbounds").toArray().first().toObject().value("settings").toObject()
+            .value("vnext").toArray().first().toObject();
+        QString xrayHost = vnext.value("address").toString();
+        if (numericHost.setAddress(xrayHost)) xrayHost = numericHost.toString();
+        m_expectedHealth = {QUuid::createUuid().toString(QUuid::WithoutBraces), QStringLiteral("78726179"),
+            AwgHealthContext::endpointForHost(xrayHost, vnext.value("port").toInt())};
+    } else
     m_expectedHealth = {QUuid::createUuid().toString(QUuid::WithoutBraces),
         QString::fromLatin1(QByteArray::fromBase64(peer.value("server_pub_key").toString().toLatin1()).toHex()),
         AwgHealthContext::endpointForHost(host, peer.value("port").toInt())};

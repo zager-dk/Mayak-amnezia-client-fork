@@ -4,6 +4,7 @@
 #include <QEventLoop>
 #include <QFile>
 #include <QHostInfo>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QObject>
 #include <QSharedPointer>
@@ -18,7 +19,20 @@
 #ifdef AMNEZIA_DESKTOP
     #include "core/utils/ipcClient.h"
     #include <core/protocols/wireGuardProtocol.h>
+    #include <core/protocols/xrayProtocol.h>
+    #include "core/controllers/mayakForeignVpn.h"
+    #include <QLocalSocket>
+    #include "core/utils/constants/protocolConstants.h"
+    #include <QJsonDocument>
+    #include <QNetworkInterface>
     #include <QRemoteObjectPendingCallWatcher>
+#endif
+#ifdef Q_OS_WIN
+    #include <winsock2.h>
+    #include <ws2ipdef.h>
+    #include <iphlpapi.h>
+    #include <netioapi.h>
+    #include <tlhelp32.h>
 #endif
 
 #ifdef Q_OS_ANDROID
@@ -179,6 +193,10 @@ struct VpnConnection::ManagedBackend {
     quint64 endpointsGeneration = 0; // a late DNS answer of an older start/adopt must not overwrite
     std::function<void(MayakBackendBridge::Ticket, AwgTunnelHealth)> health;
     MayakBackendBridge::Done event;
+    // Mayak Xray path: XrayProtocol backend; its health is its own tunnel interface (no peer).
+    bool xray = false;
+    QPointer<QTimer> xrayHealthTimer;
+    qint64 raceToken = 0; // service xray engine token of the path race (no tunnel)
 };
 
 VpnConnection::VpnConnection(SecureServersRepository* serversRepository, SecureAppSettingsRepository* appSettingsRepository, QObject *parent)
@@ -916,7 +934,8 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
         if (B::monotonicMillis() >= deadline) t.gate->cancel();
         if (t.gate->state.load() != B::StartGate::Pending) { done({t, B::Outcome::Cancelled}); return; }
         const QString proto = config.value("protocol").toString();
-        if (proto != "awg" && proto != "wireguard") { done({t, B::Outcome::Failed, {}, {}, QStringLiteral("AWG required")}); return; }
+        if (proto != "awg" && proto != "wireguard" && proto != "xray") { done({t, B::Outcome::Failed, {}, {}, QStringLiteral("AWG or Xray required")}); return; }
+        if (s->raceToken) { done({t, B::Outcome::Busy}); return; } // the race engine is still running
         // Split tunneling: the fork's settings apply to Mayak sessions as well (they bypass
         // connectToVpn), with the Mayak invariants that keep the tunnel proof possible.
         self->appendSplitTunnelingConfig(config);
@@ -942,6 +961,10 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
             .arg(selfKept ? 1 : 0).arg(endpoints.size());
         s->ticket = t; s->adoptedFrom = {}; s->probeEndpoints = endpoints; ++s->endpointsGeneration;
 #ifdef AMNEZIA_DESKTOP
+        if (config.value("protocol").toString() == QStringLiteral("xray")) {
+            self->launchMayakXray(s, t, config, deadline, done);
+            return;
+        }
         // Existing AWG protocol wrapper, never a second backend implementation.
         auto* wg = new WireguardProtocol(config);
         wg->useManagedLifecycle();
@@ -1093,6 +1116,7 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
             done(result);
         });
 #ifdef AMNEZIA_DESKTOP
+        if (s->xray) { self->stopMayakXray(s, finish, nonce, context, deadline); return; }
         auto* wg = qobject_cast<WireguardProtocol*>(s->protocol.data());
         if (!wg) { done(result); *completed = true; return; }
         connect(wg, &WireguardProtocol::managedStopped, self, finish);
@@ -1140,6 +1164,12 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
         };
         QTimer::singleShot(int(qMax<qint64>(0, deadline-B::monotonicMillis())), self, [finish,nonce] { finish(nonce, "unknown", {}); });
 #ifdef AMNEZIA_DESKTOP
+        if (s->xray) {
+            // This process still runs a managed Xray path: it is the own backend to stop.
+            finish(nonce, s->ticket.valid() ? QStringLiteral("active") : QStringLiteral("off"), s->expected.id);
+            return;
+        }
+        if (!self->cleanupMayakXrayLeftover()) { finish(nonce, QStringLiteral("unknown"), {}); return; }
         auto* wg = qobject_cast<WireguardProtocol*>(s->protocol.data());
         if (!wg) { wg = new WireguardProtocol(QJsonObject{}); s->protocol.reset(wg); }
         connect(wg, &WireguardProtocol::managedInspected, self, finish);
@@ -1162,6 +1192,8 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
         auto* probe = new MayakTunnelProbe(self);
         s->probe = probe;
         request.pinnedEndpoints = s->probeEndpoints;
+        // A managed proof is always bound to its interface with the exit's own egress.
+        request.socksPort = 0; request.acceptAnyPublicEgress = false;
         request.deadlineMs = int(qMin<qint64>(request.deadlineMs,qMax<qint64>(0,deadline-B::monotonicMillis())));
         connect(probe,&MayakTunnelProbe::finished,self,[self,s,t,done,probe](quint64,bool ok,MayakTunnelProbeProof proof,QString error) {
             probe->deleteLater();
@@ -1171,7 +1203,68 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
         });
         probe->start(request);
     };
+#ifdef AMNEZIA_DESKTOP
+    // Xray path race: the service's xray engine with loopback SOCKS entries only (no TUN, no
+    // routes). Never while a managed tunnel or a legacy connection runs.
+    port.raceStart = [self](QString, QJsonObject config, B::Millis deadline, std::function<void(bool)> done) {
+        if (!self) return;
+        if (!self->m_managedBackend) self->m_managedBackend = std::make_shared<ManagedBackend>();
+        const auto s = self->m_managedBackend;
+        if (s->ticket.valid() || s->raceToken || self->m_vpnProtocol || B::monotonicMillis() >= deadline) { done(false); return; }
+        const QString json = QString::fromUtf8(QJsonDocument(config).toJson(QJsonDocument::Compact));
+        const qint64 token = IpcClient::withInterface([&json](QSharedPointer<IpcInterfaceReplica> iface) -> qint64 {
+            auto start = iface->xrayStartOwned(json);
+            return start.waitForFinished() ? start.returnValue() : 0;
+        }, [] { return qint64(0); });
+        s->raceToken = token;
+        qInfo().noquote() << QStringLiteral("MayakNet event=race_engine_start ok=%1").arg(token ? 1 : 0);
+        done(token != 0);
+    };
+    port.raceStop = [self](QString, B::Millis, std::function<void(bool)> done) {
+        if (!self) return;
+        const auto s = self->m_managedBackend;
+        if (!s || !s->raceToken) { done(true); return; }
+        const qint64 token = s->raceToken;
+        const bool stopped = IpcClient::withInterface([token](QSharedPointer<IpcInterfaceReplica> iface) {
+            auto stop = iface->xrayStopOwned(token);
+            return stop.waitForFinished() && stop.returnValue();
+        }, [] { return false; });
+        // A later managed start replaces the service's single xray engine anyway: never let an
+        // unconfirmed race stop block every following start of this process.
+        s->raceToken = 0;
+        qInfo().noquote() << QStringLiteral("MayakNet event=race_engine_stop ok=%1").arg(stopped ? 1 : 0);
+        done(stopped);
+    };
+#endif
 #ifdef Q_OS_ANDROID
+    // Xray path race: xray in the app process with loopback SOCKS entries only (no VpnService).
+    port.raceStart = [self](QString, QJsonObject config, B::Millis deadline, std::function<void(bool)> done) {
+        if (!self) return;
+        if (!self->m_managedBackend) self->m_managedBackend = std::make_shared<ManagedBackend>();
+        const auto s = self->m_managedBackend;
+        if (s->ticket.valid() || s->raceToken || B::monotonicMillis() >= deadline) { done(false); return; }
+        const auto context = QNativeInterface::QAndroidApplication::context();
+        const QString json = QString::fromUtf8(QJsonDocument(config).toJson(QJsonDocument::Compact));
+        const bool ok = QJniObject::callStaticMethod<jboolean>("org/amnezia/vpn/protocol/xray/MayakXrayRace", "start",
+            "(Landroid/content/Context;Ljava/lang/String;)Z", context.object<jobject>(), QJniObject::fromString(json).object<jstring>());
+        QJniEnvironment env;
+        if (env->ExceptionCheck()) { env->ExceptionClear(); done(false); return; }
+        s->raceToken = ok ? 1 : 0;
+        qInfo().noquote() << QStringLiteral("MayakNet event=race_engine_start ok=%1").arg(ok ? 1 : 0);
+        done(ok);
+    };
+    port.raceStop = [self](QString, B::Millis, std::function<void(bool)> done) {
+        if (!self) return;
+        const auto s = self->m_managedBackend;
+        if (!s || !s->raceToken) { done(true); return; }
+        const auto context = QNativeInterface::QAndroidApplication::context();
+        const bool ok = QJniObject::callStaticMethod<jboolean>("org/amnezia/vpn/protocol/xray/MayakXrayRace", "stop",
+            "(Landroid/content/Context;)Z", context.object<jobject>());
+        QJniEnvironment env;
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        s->raceToken = 0; // MayakXrayRace.stop() always forgets the engine
+        done(ok);
+    };
     // Soft recovery: same ticket and proof context, new AWG backend transport.
     port.recover = [self, android](B::Ticket t, QString nonce, B::Millis deadline, B::Done done) {
         if (!self) return;
@@ -1334,3 +1427,200 @@ MayakBackendBridge::Port VpnConnection::managedBackendPort() {
 #endif
     return port;
 }
+
+
+#ifdef AMNEZIA_DESKTOP
+namespace {
+constexpr char kMayakXrayTun[] = "tun2"; // XrayProtocol's interface (Windows/Linux)
+// The Xray tunnel interface: the one owning XrayProtocol's local address.
+bool mayakXrayInterface(QNetworkInterface *out) {
+    for (const auto &iface : QNetworkInterface::allInterfaces())
+        for (const auto &entry : iface.addressEntries())
+            if (entry.ip().toString() == QLatin1String(amnezia::protocols::xray::defaultLocalAddr)) { if (out) *out = iface; return true; }
+    return false;
+}
+void mayakInterfaceCounters(int index, quint64 *rx, quint64 *tx) {
+    *rx = *tx = 0;
+#ifdef Q_OS_WIN
+    MIB_IF_ROW2 row{};
+    row.InterfaceIndex = NET_IFINDEX(index);
+    if (GetIfEntry2(&row) == NO_ERROR) { *rx = row.InOctets; *tx = row.OutOctets; }
+#else
+    Q_UNUSED(index);
+#endif
+}
+// Another MayakVPN.exe (e.g. another Windows user's session) than this process is running.
+bool mayakOtherAppRunning() {
+#ifdef Q_OS_WIN
+    const DWORD self = GetCurrentProcessId();
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (snapshot == INVALID_HANDLE_VALUE) return true; // unknown: do not touch the tunnel
+    bool other = false;
+    PROCESSENTRY32W entry{};
+    entry.dwSize = sizeof(entry);
+    for (BOOL ok = Process32FirstW(snapshot, &entry); ok && !other; ok = Process32NextW(snapshot, &entry))
+        other = _wcsicmp(entry.szExeFile, L"MayakVPN.exe") == 0 && entry.th32ProcessID != self;
+    CloseHandle(snapshot);
+    return other;
+#else
+    return false;
+#endif
+}
+QString mayakXrayEndpoint(const QJsonObject &config) {
+    const QJsonObject data = config.value(QStringLiteral("xray_config_data")).toObject();
+    const QJsonObject client = QJsonDocument::fromJson(data.value(amnezia::configKey::config).toString().toUtf8()).object();
+    const QJsonObject vnext = client.value("outbounds").toArray().first().toObject().value("settings").toObject()
+                                  .value("vnext").toArray().first().toObject();
+    QString host = vnext.value("address").toString();
+    QHostAddress numeric;
+    if (numeric.setAddress(host)) host = numeric.toString();
+    const int port = vnext.value("port").toInt();
+    return host.isEmpty() || port <= 0 ? QString() : AwgHealthContext::endpointForHost(host, port);
+}
+}
+
+bool VpnConnection::cleanupMayakXrayLeftover()
+{
+    if (!mayakXrayInterface(nullptr)) return true;
+    if (m_vpnProtocol) return true; // a live connection of this process owns the interface
+    // Another Mayak app (another Windows user, same service) may own this live tunnel: never end it.
+    if (mayakOtherAppRunning()) { qInfo().noquote() << QStringLiteral("MayakNet event=xray_leftover_skip reason=other_app"); return true; }
+    qInfo().noquote() << QStringLiteral("MayakNet event=xray_leftover_cleanup");
+    // The orphaned tun2socks keeps the adapter; only the service may end it (own executable only).
+    const int ended = mayak::foreignvpn::stopXrayLeftoverBlocking(1500);
+    qInfo().noquote() << QStringLiteral("MayakNet event=xray_leftover_tun2socks ended=%1").arg(ended);
+    // 10.33.0.2 is also used by other Amnezia-based apps: the system-wide part of the cleanup
+    // runs only when Mayak's own tun2socks was found and ended (the tunnel was ours).
+    if (ended <= 0) return true;
+    IpcClient::withInterface([](QSharedPointer<IpcInterfaceReplica> iface) {
+        // As XrayProtocol::stop(): a kill switch of the ended tunnel must not outlive it.
+        auto killSwitch = iface->disableKillSwitch(); killSwitch.waitForFinished();
+        auto stop = iface->xrayStop(); stop.waitForFinished();
+        auto tun = iface->deleteTun(QString::fromLatin1(kMayakXrayTun)); tun.waitForFinished();
+        auto routes = iface->clearSavedRoutes(); routes.waitForFinished();
+        auto dns = iface->restoreResolvers(); dns.waitForFinished();
+        auto ipv6 = iface->StartRoutingIpv6(); ipv6.waitForFinished();
+        return true;
+    }, [] { return false; });
+    // No waiting here: the result does not gate the inspection (its 3 s budget stays for AWG).
+    const bool gone = !mayakXrayInterface(nullptr);
+    qInfo().noquote() << QStringLiteral("MayakNet event=xray_leftover_cleanup_done gone=%1").arg(gone ? 1 : 0);
+    // Never block the inspection on it: without engine, routes and DNS the adapter carries
+    // nothing, AWG is unaffected, and an Xray path start fails cleanly to the next path.
+    return true;
+}
+
+void VpnConnection::launchMayakXray(std::shared_ptr<ManagedBackend> s, MayakBackendBridge::Ticket t, QJsonObject config,
+                                    qint64 deadline, MayakBackendBridge::Done done)
+{
+    using B = MayakBackendBridge;
+    const QString endpoint = mayakXrayEndpoint(config);
+    if (endpoint.isEmpty()) { s->ticket = {}; done({t, B::Outcome::Failed, {}, {}, QStringLiteral("xray endpoint")}); return; }
+    // The site mode of the config (incl. «Россия напрямую») is applied below by routes, so the
+    // fork's XrayProtocol must not add its own "all sites" routes: it sees the site mode.
+    const int siteMode = config.value(amnezia::configKey::splitTunnelType).toInt();
+    QStringList sites;
+    for (const auto &v : config.value(amnezia::configKey::splitTunnelSites).toArray()) sites << v.toString();
+    auto *xray = new XrayProtocol(config);
+    s->protocol.reset(xray);
+    s->xray = true;
+    s->expected = AwgHealthContext{QStringLiteral("xray:") + t.opaqueAttempt, QStringLiteral("78726179"), endpoint};
+    const AwgHealthContext expected = s->expected;
+    const QString dns1 = config.value(amnezia::configKey::dns1).toString(), dns2 = config.value(amnezia::configKey::dns2).toString();
+    auto settled = std::make_shared<bool>(false);
+    const std::weak_ptr<ManagedBackend> weak = s;
+    const QPointer<VpnConnection> self(this);
+    auto report = [self, weak, t, expected, done, settled](B::Outcome outcome, const QString &detail) {
+        if (*settled) return;
+        *settled = true;
+        qInfo().noquote() << QStringLiteral("MayakNet event=xray_backend_start outcome=%1 detail=%2").arg(int(outcome)).arg(detail);
+        done({t, outcome, expected, {}, detail});
+    };
+    connect(xray, &VpnProtocol::connectionStateChanged, this, [self, weak, t, expected, report, siteMode, sites, dns1, dns2, xray](Vpn::ConnectionState state) {
+        const auto s = weak.lock();
+        if (!self || !s || s->protocol.data() != xray || !s->ticket.same(t)) return;
+        if (state == Vpn::ConnectionState::Connected) {
+            // Started only: tun2socks and routes are up. Never "connected" -- the owner proves it.
+            const QString tunGw = xray->vpnGateway(), physGw = xray->routeGateway();
+            const bool routed = IpcClient::withInterface([&](QSharedPointer<IpcInterfaceReplica> iface) {
+                auto add = [&iface](const QString &gw, const QStringList &ips) {
+                    if (ips.isEmpty()) return 0;
+                    auto call = iface->routeAddList(gw, ips);
+                    return call.waitForFinished() ? call.returnValue() : -1;
+                };
+                QStringList dns; if (!dns1.isEmpty()) dns << dns1; if (!dns2.isEmpty()) dns << dns2;
+                if (siteMode == amnezia::RouteMode::VpnAllExceptSites) {
+                    if (add(tunGw, {QStringLiteral("0.0.0.0/1"), QStringLiteral("128.0.0.0/1")}) != 2) return false;
+                    add(physGw, {expected.endpoint.section(':', 0, 0)});
+                    const int direct = add(physGw, sites);
+                    qInfo().noquote() << QStringLiteral("MayakNet event=xray_routes mode=except direct=%1/%2").arg(direct).arg(sites.size());
+                } else if (siteMode == amnezia::RouteMode::VpnOnlyForwardSites) {
+                    const int via = add(tunGw, sites);
+                    add(tunGw, dns);
+                    qInfo().noquote() << QStringLiteral("MayakNet event=xray_routes mode=only via=%1/%2").arg(via).arg(sites.size());
+                    if (via <= 0) return false;
+                }
+                return true;
+            }, [] { return false; });
+            if (!routed) { report(B::Outcome::Failed, QStringLiteral("routes")); return; }
+            // Health = this tunnel's interface identity and byte counters (no peer exists).
+            auto *timer = new QTimer(self);
+            timer->setInterval(1000);
+            s->xrayHealthTimer = timer;
+            auto generation = std::make_shared<quint64>(1);
+            const auto tick = [self, weak, t, expected, timer] {
+                const auto s = weak.lock();
+                if (!self || !s || !s->xray || !s->ticket.same(t) || s->xrayHealthTimer != timer) { timer->deleteLater(); return; }
+                QNetworkInterface iface;
+                if (!mayakXrayInterface(&iface)) return;
+                quint64 rx = 0, tx = 0;
+                mayakInterfaceCounters(iface.index(), &rx, &tx);
+                AwgTunnelHealth h;
+                h.healthContextId = expected.id; h.generation = 1; h.peerPublicKey = expected.peerPublicKey; h.endpoint = expected.endpoint;
+                h.localAddress = QString::fromLatin1(amnezia::protocols::xray::defaultLocalAddr) + QStringLiteral("/32");
+                h.interfaceName = iface.name(); h.rxTotal = rx; h.txTotal = tx; h.valid = true;
+                if (s->health) s->health(t, h);
+            };
+            QObject::connect(timer, &QTimer::timeout, self, tick);
+            timer->start();
+            QTimer::singleShot(0, timer, tick);
+            report(B::Outcome::Started, QStringLiteral("tunnel_up"));
+        } else if (state == Vpn::ConnectionState::Error || state == Vpn::ConnectionState::Disconnected) {
+            report(B::Outcome::Failed, QStringLiteral("backend_down"));
+            // A running path that died: the owner's monitor sees no health/probe and stops it.
+            if (s->event && s->ticket.same(t)) s->event({t, B::Outcome::Failed, expected});
+        }
+    }, Qt::QueuedConnection);
+    // This check is the linearization point immediately before native start.
+    if (B::monotonicMillis() >= deadline || !t.gate->commit()) {
+        t.gate->cancel(); s->protocol.reset(); s->ticket = {}; s->xray = false;
+        report(B::Outcome::Cancelled, QStringLiteral("cancelled")); return;
+    }
+    QTimer::singleShot(int(qMax<qint64>(0, deadline - B::monotonicMillis())), this, [report] {
+        report(B::Outcome::Failed, QStringLiteral("deadline"));
+    });
+    const ErrorCode err = xray->start();
+    if (err != ErrorCode::NoError) report(B::Outcome::Failed, QStringLiteral("start_error_%1").arg(int(err)));
+}
+
+void VpnConnection::stopMayakXray(std::shared_ptr<ManagedBackend> s, std::function<void(QString, QString, bool)> finish,
+                                  QString nonce, QString context, qint64 deadline)
+{
+    if (s->xrayHealthTimer) { s->xrayHealthTimer->stop(); s->xrayHealthTimer->deleteLater(); s->xrayHealthTimer.clear(); }
+    auto *xray = dynamic_cast<XrayProtocol *>(s->protocol.data()); // XrayProtocol has no Q_OBJECT
+    if (xray) {
+        xray->blockSignals(true); // our own stop is not a backend failure
+        xray->stop();             // synchronous: tun, resolvers, routes of the fork, engine, tun2socks
+    }
+    IpcClient::withInterface([](QSharedPointer<IpcInterfaceReplica> iface) {
+        auto routes = iface->clearSavedRoutes(); // the site routes added by launchMayakXray
+        return routes.waitForFinished() && routes.returnValue();
+    }, [] { return false; });
+    // Down = the tunnel interface is gone (bounded by the stop deadline).
+    while (mayakXrayInterface(nullptr) && MayakBackendBridge::monotonicMillis() + 100 < deadline) QThread::msleep(100);
+    const bool gone = !mayakXrayInterface(nullptr);
+    qInfo().noquote() << QStringLiteral("MayakNet event=xray_backend_stop gone=%1").arg(gone ? 1 : 0);
+    if (gone) s->xray = false;
+    finish(nonce, context, gone);
+}
+#endif
