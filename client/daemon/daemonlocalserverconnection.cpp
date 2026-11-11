@@ -152,6 +152,16 @@ void DaemonLocalServerConnection::parseCommand(const QByteArray& data) {
         {"requestId", request}, {"stopped", stopped}});
     return;
   }
+  // Mayak: prepare app exclusions before a connect (may take seconds: AmneziaVPN's copy of the split tunnel
+  // driver is released for Mayak when it holds the device and runs no VPN).
+  if (type == "mayakPrepareSplitTunnel") {
+    const QString request = obj.value("requestId").toString();
+    if (request.size() != 64) return;
+    const QString result = Daemon::instance()->mayakPrepareSplitTunnel();
+    write(QJsonObject{{"type", "mayakSplitTunnelPrepared"}, {"owner", "MayakVpnAwgLifecycleV1"},
+        {"requestId", request}, {"result", result}});
+    return;
+  }
   // Mayak: the app found its own Xray tunnel left by an ended app process. Ends only tun2socks
   // started from this installation's tun2socks.exe.
   if (type == "mayakStopXrayLeftover") {

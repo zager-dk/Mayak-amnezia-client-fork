@@ -94,6 +94,7 @@ struct World : QObject {
     QJsonObject lastXrayConfig;
     // Race engine fixture: started engines get loopback SOCKS entries nobody serves.
     bool withRace=false, raceEngineOk=true;
+    bool appExclusionFails=false; // the Windows service reports that app exclusions cannot be applied
     int raceStarts=0, raceStops=0; bool raceRunning=false;
     QJsonObject raceConfig;
     int localFailStarts=0; // Windows: the next N starts never bring the tunnel interface up (no health)
@@ -149,6 +150,7 @@ struct World : QObject {
                 return;
             }
             ++awgStarts;
+            if (appExclusionFails) mayak::split::markAppExclusionFailure();
             if(holdStart) { startDone=done; return; }
             ticket.gate->commit(); backendRunning=true;
             AwgHealthContext expected{guid(),QString(64,'a'),selectedHost+":49963"};
@@ -405,6 +407,13 @@ struct FastRecoveryTiming {
     FastRecoveryTiming& operator=(const FastRecoveryTiming&) = delete;
 };
 }
+// Restores the process-wide coordinator budgets even when a check fails early.
+struct CoordinatorTimingGuard {
+    mayak::autoconnect::Timing saved = mayak::autoconnect::Coordinator::timing();
+    ~CoordinatorTimingGuard() { mayak::autoconnect::Coordinator::timing() = saved; }
+};
+// Restores the default (service) app-exclusion preparation.
+struct SplitPrepareGuard { ~SplitPrepareGuard() { MayakAutoConnectRuntime::setSplitPrepareForTests({}); } };
 class RuntimeTest : public QObject {
     Q_OBJECT
 private slots:
@@ -1921,7 +1930,7 @@ private slots:
     // ---------- 5.1.0.21 «4 пути» ----------
     void xrayPathConnectsOnTheSameAllocationWhenAwgIsSilent() {
         FastRecoveryTiming timing;
-        auto& t=mayak::autoconnect::Coordinator::timing(); const auto saved=t; t.awgVerifyMs=400;
+        CoordinatorTimingGuard timingGuard; auto& t=mayak::autoconnect::Coordinator::timing(); t.awgVerifyMs=400;
         World w; w.singleCandidate=true; w.offerXray=true; w.awgSilent=true;
         w.app.setMayakConnectionMethod("auto");
         w.runtime->begin(w.id);
@@ -1951,18 +1960,16 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
         QCOMPARE(w.startedProtocols.value(0),QStringLiteral("xray"));
         settle(w);
-        t=saved;
     }
     void onlyAwgNeverStartsXray() {
         FastRecoveryTiming timing;
-        auto& t=mayak::autoconnect::Coordinator::timing(); const auto saved=t; t.awgVerifyMs=400;
+        CoordinatorTimingGuard timingGuard; auto& t=mayak::autoconnect::Coordinator::timing(); t.awgVerifyMs=400;
         World w; w.singleCandidate=true; w.offerXray=true; w.awgSilent=true;
         w.app.setMayakConnectionMethod("awg");
         w.runtime->begin(w.id);
         QTRY_VERIFY_WITH_TIMEOUT(w.state==Vpn::ConnectionState::Error || w.runtime->message().contains(QStringLiteral("повторяем")),10000);
         QCOMPARE(w.xrayStarts,0);
         settle(w);
-        t=saved;
     }
     void onlyXrayNeverStartsAwg() {
         FastRecoveryTiming timing;
@@ -1972,6 +1979,54 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
         QCOMPARE(w.awgStarts,0); QCOMPARE(w.xrayStarts,1);
         QCOMPARE(w.runtime->exitLocation().value("pathId").toString(),QStringLiteral("xray-firefox"));
+        settle(w);
+    }
+    void appExclusionsArePreparedBeforeAnyTunnelStarts() {
+        FastRecoveryTiming timing; SplitPrepareGuard prepareGuard;
+        int prepares=0; QString answer=QStringLiteral("amnezia_active");
+        MayakAutoConnectRuntime::setSplitPrepareForTests([&](QObject* ctx, std::function<void(bool, QString)> done) {
+            ++prepares; QTimer::singleShot(20, ctx, [done, &answer] { done(true, answer); });
+        });
+        World w; w.singleCandidate=true;
+        w.app.setAppsSplitTunnelingEnabled(true);
+        w.app.setAppsRouteMode(amnezia::AppsRouteMode::VpnAllExceptApps);
+        w.app.setVpnApps(amnezia::AppsRouteMode::VpnAllExceptApps, {InstalledAppInfo{QStringLiteral("Bank"), {}, QStringLiteral("C:/bank.exe")}});
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,10000);
+        QVERIFY(w.runtime->message().contains(QStringLiteral("AmneziaVPN")));
+        QCOMPARE(prepares,1); QCOMPARE(w.starts,0); QCOMPARE(w.acquires,0);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+        answer=QStringLiteral("ok");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(prepares,2);
+        settle(w);
+    }
+    void appExclusionPrepareIsSkippedWithoutExclusions() {
+        FastRecoveryTiming timing; SplitPrepareGuard prepareGuard;
+        int prepares=0;
+        MayakAutoConnectRuntime::setSplitPrepareForTests([&](QObject*, std::function<void(bool, QString)> done) { ++prepares; done(true, QStringLiteral("ok")); });
+        World w; w.singleCandidate=true;
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
+        QCOMPARE(prepares,0);
+        settle(w);
+    }
+    void appExclusionFailureEndsWithClearErrorAndNoXrayFallback() {
+        FastRecoveryTiming timing;
+        CoordinatorTimingGuard timingGuard; auto& t=mayak::autoconnect::Coordinator::timing(); t.awgVerifyMs=2000;
+        World w; w.singleCandidate=true; w.offerXray=true; w.awgSilent=true; w.appExclusionFails=true;
+        w.app.setMayakConnectionMethod("auto");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Error,10000);
+        QVERIFY(w.runtime->message().contains(QStringLiteral("исключения программ")));
+        QCOMPARE(w.xrayStarts,0);          // no silent fallback to a path without app exclusions
+        QTRY_COMPARE_WITH_TIMEOUT(w.records(),0,5000);
+        QTRY_VERIFY_WITH_TIMEOUT(!w.runtime->busy(),5000);
+        // A later connect is a new session: an old failure does not block it.
+        w.appExclusionFails=false; w.awgSilent=false; w.app.setMayakConnectionMethod("awg");
+        w.runtime->begin(w.id);
+        QTRY_COMPARE_WITH_TIMEOUT(w.state,Vpn::ConnectionState::Connected,10000);
         settle(w);
     }
     void connectedXrayEndsOnlyAfterThreeFailedProbes() {
@@ -2002,7 +2057,7 @@ private slots:
     }
     void deadXrayPathsFallBackToTheNextPathThenError() {
         FastRecoveryTiming timing;
-        auto& t=mayak::autoconnect::Coordinator::timing(); const auto saved=t; t.xrayVerifyMs=300;
+        CoordinatorTimingGuard timingGuard; auto& t=mayak::autoconnect::Coordinator::timing(); t.xrayVerifyMs=300;
         World w; w.singleCandidate=true; w.offerXray=true; w.xrayDead=true;
         w.app.setMayakConnectionMethod("xray");
         w.runtime->begin(w.id);
@@ -2011,7 +2066,6 @@ private slots:
         QVERIFY(w.state!=Vpn::ConnectionState::Connected);
         QCOMPARE(w.acquires>=1,true);
         settle(w);
-        t=saved;
     }
 
     void raceWithoutAnswersDropsXrayAndNeverOverlapsATunnel() {

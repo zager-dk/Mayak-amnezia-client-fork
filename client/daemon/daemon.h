@@ -43,6 +43,8 @@ class Daemon : public QObject {
   bool managedDeactivate(const QString& controlIdentity);
   QJsonObject managedInspection();
   virtual QJsonObject getStatus();
+  // Mayak: make app exclusions usable before a connect ("ok" or a reason). Only Windows needs it.
+  virtual QString mayakPrepareSplitTunnel() { return QStringLiteral("ok"); }
 
   // Callback before any Activating measure is done
   virtual void prepareActivation(const InterfaceConfig& config, int inetAdapterIndex = 0) {

@@ -156,6 +156,30 @@ private slots:
         QCOMPARE(stopped, -1);
     }
 
+    void prepareSplitTunnelRequestAndReply() {
+        const QString id(64, QLatin1Char('a'));
+        const auto line = prepareSplitTunnelRequestLine(id);
+        QVERIFY(line.endsWith('\n'));
+        const auto obj = QJsonDocument::fromJson(line).object();
+        QCOMPARE(obj.value("type").toString(), QStringLiteral("mayakPrepareSplitTunnel"));
+        QCOMPARE(obj.value("requestId").toString(), id);
+        const auto answer = [](const QString& owner, const QString& req, const QString& result) {
+            return QJsonDocument(QJsonObject{{"type", "mayakSplitTunnelPrepared"}, {"owner", owner},
+                                             {"requestId", req}, {"result", result}}).toJson(QJsonDocument::Compact);
+        };
+        QString result;
+        for (const char* r : {"ok", "amnezia_active", "amnezia_busy", "amnezia_holds", "mullvad", "unavailable"}) {
+            QVERIFY(parsePrepareSplitTunnelReply(answer(kOwner, id, QString::fromLatin1(r)), id, &result));
+            QCOMPARE(result, QString::fromLatin1(r));
+        }
+        result.clear();
+        QVERIFY(!parsePrepareSplitTunnelReply(answer(kOwner, id, QStringLiteral("maybe")), id, &result));
+        QVERIFY(!parsePrepareSplitTunnelReply(answer(kOwner, QString(64, QLatin1Char('b')), QStringLiteral("ok")), id, &result));
+        QVERIFY(!parsePrepareSplitTunnelReply(answer(QStringLiteral("x"), id, QStringLiteral("ok")), id, &result));
+        QVERIFY(!parsePrepareSplitTunnelReply(reply(kOwner, id, 1), id, &result)); // a stop reply is not an answer
+        QVERIFY(result.isEmpty());
+    }
+
 #ifdef Q_OS_WINDOWS
     void serviceEndsOnlyBrowsecsCoreByPath() {
         using MayakForeignVpnStop::isKnownCore;

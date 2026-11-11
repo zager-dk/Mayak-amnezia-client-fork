@@ -24,6 +24,7 @@
 #include <QPointer>
 
 #include "leakdetector.h"
+#include "core/utils/mayakSplitTunneling.h"
 #include "logger.h"
 #include "daemon/daemonerrors.h"
 
@@ -598,6 +599,7 @@ void LocalSocketController::parseCommand(const QByteArray& command) {
         // REPORTERROR(ErrorHandler::ControllerError, "controller");
         break;
       case DaemonError::ERROR_SPLIT_TUNNEL_INIT_FAILURE:
+        mayak::split::markAppExclusionFailure();
         [[fallthrough]];
       case DaemonError::ERROR_SPLIT_TUNNEL_START_FAILURE:
         [[fallthrough]];

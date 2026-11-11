@@ -62,6 +62,8 @@ public:
     static RecoveryTiming recoveryTiming();
     static void setRecoveryTimingForTests(const RecoveryTiming& timing);
     static void resetFailoverMemoryForTests();
+    // Replaces the service's app-exclusion preparation (Windows) in tests; empty restores the default.
+    static void setSplitPrepareForTests(std::function<void(QObject*, std::function<void(bool, QString)>)> hook);
 signals:
     void stateChanged(Vpn::ConnectionState state, const QString& message);
 private:

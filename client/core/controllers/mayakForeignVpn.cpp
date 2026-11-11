@@ -207,6 +207,67 @@ void requestStop(QObject* ctx, std::function<void(bool, int)> done, int timeoutM
 #endif
 }
 
+QByteArray prepareSplitTunnelRequestLine(const QString& requestId) {
+    QJsonObject obj{{QStringLiteral("type"), QStringLiteral("mayakPrepareSplitTunnel")},
+                    {QStringLiteral("requestId"), requestId}};
+    return QJsonDocument(obj).toJson(QJsonDocument::Compact) + '\n';
+}
+
+bool parsePrepareSplitTunnelReply(const QByteArray& line, const QString& requestId, QString* result) {
+    const auto obj = QJsonDocument::fromJson(line.trimmed()).object();
+    if (obj.value(QStringLiteral("type")).toString() != QStringLiteral("mayakSplitTunnelPrepared")) return false;
+    if (obj.value(QStringLiteral("owner")).toString() != QLatin1String(kOwner)) return false;
+    if (requestId.isEmpty() || obj.value(QStringLiteral("requestId")).toString() != requestId) return false;
+    static const QStringList known{QStringLiteral("ok"), QStringLiteral("amnezia_active"), QStringLiteral("amnezia_busy"),
+        QStringLiteral("amnezia_holds"), QStringLiteral("mullvad"), QStringLiteral("unavailable")};
+    const QString value = obj.value(QStringLiteral("result")).toString();
+    if (!known.contains(value)) return false;
+    if (result) *result = value;
+    return true;
+}
+
+void requestPrepareSplitTunnel(QObject* ctx, std::function<void(bool, QString)> done, int timeoutMs) {
+#ifndef Q_OS_WINDOWS
+    QTimer::singleShot(0, ctx, [done] { done(true, QStringLiteral("ok")); });
+    return;
+#else
+    QByteArray raw(32, Qt::Uninitialized);
+    QRandomGenerator::system()->generate(reinterpret_cast<quint32*>(raw.data()),
+                                         reinterpret_cast<quint32*>(raw.data() + raw.size()));
+    const QString id = QString::fromLatin1(raw.toHex());
+    auto* socket = new QLocalSocket(ctx);
+    auto* timer = new QTimer(socket);
+    timer->setSingleShot(true);
+    auto finished = std::make_shared<bool>(false);
+    auto buffer = std::make_shared<QByteArray>();
+    auto finish = [socket, done, finished](bool replied, QString result) {
+        if (*finished) return;
+        *finished = true;
+        done(replied, result);
+        socket->abort();
+        socket->deleteLater();
+    };
+    QObject::connect(socket, &QLocalSocket::connected, socket, [socket, id] {
+        socket->write(prepareSplitTunnelRequestLine(id));
+        socket->flush();
+    });
+    QObject::connect(socket, &QLocalSocket::readyRead, socket, [socket, buffer, id, finish] {
+        buffer->append(socket->readAll());
+        for (qsizetype pos; (pos = buffer->indexOf('\n')) >= 0;) {
+            const QByteArray line = buffer->left(pos);
+            buffer->remove(0, pos + 1);
+            QString result;
+            if (parsePrepareSplitTunnelReply(line, id, &result)) { finish(true, result); return; }
+        }
+        if (buffer->size() > 64 * 1024) finish(false, {});
+    });
+    QObject::connect(socket, &QLocalSocket::errorOccurred, socket, [finish] { finish(false, {}); });
+    QObject::connect(timer, &QTimer::timeout, socket, [finish] { finish(false, {}); });
+    timer->start(timeoutMs);
+    socket->connectToServer(QLatin1String(kDaemonPipe));
+#endif
+}
+
 int stopXrayLeftoverBlocking(int timeoutMs) {
 #ifndef Q_OS_WINDOWS
     Q_UNUSED(timeoutMs);

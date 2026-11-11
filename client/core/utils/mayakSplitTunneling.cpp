@@ -1,11 +1,25 @@
 #include "mayakSplitTunneling.h"
 
 #include <QDir>
+#include <atomic>
+#include <chrono>
 #include <algorithm>
 #include <QHostAddress>
 #include <QJsonArray>
 
 namespace mayak::split {
+namespace {
+std::atomic<qint64> g_appExclusionFailureAt{0};
+}
+qint64 monotonicNowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count();
+}
+void markAppExclusionFailure() { g_appExclusionFailureAt.store(monotonicNowMs()); }
+bool appExclusionFailedSince(qint64 monotonicMs) {
+    const qint64 at = g_appExclusionFailureAt.load();
+    return at != 0 && at >= monotonicMs;
+}
+
 namespace {
 // Values written by the fork (amnezia::RouteMode / amnezia::AppsRouteMode).
 constexpr int kAll = 0;

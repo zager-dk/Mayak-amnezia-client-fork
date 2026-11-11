@@ -239,6 +239,7 @@ std::unique_ptr<WindowsSplitTunnel> WindowsSplitTunnel::create(
   }
   if (!initDriver(driverFile)) {
     logger.error() << "Failed to init driver";
+    CloseHandle(driverFile); // Mayak: the exclusive handle would block every later attempt
     return nullptr;
   }
   // We're ready to talk to the driver, it's alive and setup.

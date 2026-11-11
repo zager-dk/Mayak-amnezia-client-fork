@@ -33,6 +33,13 @@ class WindowsDaemon final : public Daemon {
 
  private:
   void monitorBackendFailure();
+  // Mayak: (re)acquire the split tunnel driver when app exclusions are requested. AmneziaVPN's copy of the
+  // same driver is released for Mayak if it holds the device and runs no VPN (see MayakForeignVpnStop).
+  bool ensureSplitTunnel();
+  qint64 m_splitTunnelTakeoverFailedAt = 0; // a failed takeover is not repeated for a while
+
+ public:
+  QString mayakPrepareSplitTunnel() override;
 
  private:
   enum State {

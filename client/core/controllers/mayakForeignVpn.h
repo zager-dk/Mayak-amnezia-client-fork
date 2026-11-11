@@ -55,6 +55,14 @@ bool parseStopReply(const QByteArray& line, const QString& requestId, int* stopp
 void requestStop(QObject* ctx, std::function<void(bool replied, int stopped)> done,
                  int timeoutMs = 4000);
 
+// Prepares app exclusions in the Mayak service before a connect (Windows). done(replied, result) runs once
+// on ctx's thread; result is "ok", "amnezia_active", "amnezia_busy", "amnezia_holds", "mullvad" or
+// "unavailable". The service may need seconds (it releases AmneziaVPN's copy of the driver).
+QByteArray prepareSplitTunnelRequestLine(const QString& requestId);
+bool parsePrepareSplitTunnelReply(const QByteArray& line, const QString& requestId, QString* result);
+void requestPrepareSplitTunnel(QObject* ctx, std::function<void(bool replied, QString result)> done,
+                               int timeoutMs = 25000);
+
 // Mayak Xray path (Windows): asks the service to end tun2socks processes of this installation
 // (a tunnel left by an ended app). Blocking, bounded by timeoutMs. Returns the number ended, -1
 // when the service did not answer.

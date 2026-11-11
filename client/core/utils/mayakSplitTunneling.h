@@ -10,6 +10,11 @@
 // these functions only keep the tunnel proof (MayakTunnelProbe, rule 4) possible in every mode.
 // Pure functions over the managed config: no network, no settings, no platform calls.
 namespace mayak::split {
+// Windows service reported that app exclusions could not be applied (driver unavailable). Process-wide,
+// monotonic time in milliseconds; read by the Mayak runtime to show a clear error instead of retrying.
+void markAppExclusionFailure();
+bool appExclusionFailedSince(qint64 monotonicMs);
+qint64 monotonicNowMs();
 
 struct ProbeEndpoint {
     QString host;  // TLS peer name, SNI and Host header

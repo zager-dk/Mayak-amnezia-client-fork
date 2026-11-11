@@ -25,6 +25,7 @@
 #include <QNetworkInterface>
 #include <QTcpServer>
 #include "core/utils/mayakTunnelProbe.h"
+#include "mayakForeignVpn.h"
 #include "secureQSettings.h"
 #include <map>
 
@@ -89,6 +90,22 @@ void rememberPath(SecureQSettings* settings, const QString& network, bool xrayFi
     while (memory.size() > 16) memory.remove(memory.keys().first());
     settings->setValue(kPathMemoryKey, QJsonDocument(memory).toJson(QJsonDocument::Compact));
 }
+using SplitPrepare = std::function<void(QObject*, std::function<void(bool, QString)>)>;
+SplitPrepare& splitPrepareStorage() { static SplitPrepare hook; return hook; }
+const char* kAppExclusionUnavailable =
+    "Не удалось включить исключения программ: драйвер раздельного туннелирования недоступен. "
+    "Перезагрузите компьютер или уберите исключения в «Раздельное туннелирование».";
+QString splitPrepareText(const QString& result) {
+    if (result == QLatin1String("amnezia_active"))
+        return QStringLiteral("Исключения программ заняты AmneziaVPN: в ней сейчас включён VPN. Выключите VPN в AmneziaVPN и включите Маяк снова.");
+    if (result == QLatin1String("amnezia_busy"))
+        return QStringLiteral("AmneziaVPN сейчас запускается или останавливается. Включите Маяк через несколько секунд.");
+    if (result == QLatin1String("mullvad"))
+        return QStringLiteral("Исключения программ недоступны: их драйвер использует установленный Mullvad VPN. Уберите исключения в «Раздельное туннелирование».");
+    if (result == QLatin1String("amnezia_holds"))
+        return QStringLiteral("Исключения программ заняты AmneziaVPN. Перезагрузите компьютер или удалите AmneziaVPN, если она не нужна.");
+    return QString::fromUtf8(kAppExclusionUnavailable);
+}
 quint16 freeLoopbackPort() {
     QTcpServer server;
     if (!server.listen(QHostAddress::LocalHost, 0)) return 0;
@@ -146,6 +163,11 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     // the path memory, both fixed when the session starts (before any tunnel exists).
     QString method = QStringLiteral("auto");
     QString networkKey;
+    // Windows: the service could not apply the user's app exclusions (split tunnel driver unavailable).
+    // The cycle ends with a clear error instead of retrying or falling back to a path without exclusions.
+    qint64 sessionStartMono = mayak::split::monotonicNowMs();
+    bool appExclusionBlocked = false;
+    bool splitPrepared = false; // app exclusions prepared in the service for this session
     // Xray path race engine (one per session at a time). Starts wait until it is stopped.
     struct Race {
         bool engineActive = false;   // started or starting; a stop is still owed
@@ -286,6 +308,15 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
         }
         timer.setInterval(100);
         connect(&timer,&QTimer::timeout,this,[this] {
+            if (coordinator && !appExclusionBlocked && !cancelled &&
+                mayak::split::appExclusionFailedSince(sessionStartMono)) {
+                const auto st=coordinator->status().state;
+                if (st!=ac::State::Idle && st!=ac::State::Failed && st!=ac::State::Cancelled) {
+                    appExclusionBlocked=true; reconnectWanted=false; connectRetryAt=0; localStartFailed=false;
+                    logNet(QStringLiteral("event=app_exclusion_unavailable"));
+                    coordinator->cancel();
+                }
+            }
             if (coordinator) coordinator->tick();
             // Retry starts only after exact release acknowledgement and fresh fetch.
             if (reconnectWanted && coordinator && coordinator->status().state == ac::State::Failed && !inFlight) {
@@ -395,11 +426,39 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             phase=cancelled ? QStringLiteral("cancelled") : QStringLiteral("idle");
             output(Vpn::ConnectionState::Disconnected,{}); return;
         }
+        if (!splitPrepared && needsSplitPrepare()) {
+            // Windows app exclusions need the split tunnel driver; the service prepares it first, with its
+            // own time budget (it may release AmneziaVPN's copy), never inside the tunnel start deadline.
+            splitPrepared=true; preparing=true;
+            output(Vpn::ConnectionState::Preparing,QStringLiteral("Готовим исключения программ…"));
+            auto done=[weak=weak_from_this()](bool replied,QString result) {
+                auto self=weak.lock();
+                if (!self || self->cancelled || self->terminal || self->coordinator) return;
+                self->logNet(QStringLiteral("event=split_prepare replied=%1 result=%2").arg(replied ? 1 : 0).arg(result));
+                if (replied && result==QLatin1String("ok")) { self->beginCoordinatorAfterPreflight(); return; }
+                self->failureAfterAdoption(splitPrepareText(replied ? result : QStringLiteral("unavailable")));
+            };
+            if (auto& hook=splitPrepareStorage()) hook(this,done);
+            else mayak::foreignvpn::requestPrepareSplitTunnel(this,done,25000);
+            return;
+        }
         coordinator=std::make_unique<ac::Coordinator>(*this,*this,[weak=weak_from_this()](const ac::Status& s) {
             if(auto self=weak.lock()) self->state(s);
         });
         preparing=false;
         coordinator->begin();
+    }
+    // Windows app exclusions ("all apps except these") are active for this connect.
+    bool needsSplitPrepare() const {
+#ifdef Q_OS_WINDOWS
+        const bool windows=true;
+#else
+        const bool windows=bool(splitPrepareStorage());
+#endif
+        // An adopted running tunnel already has its exclusions; never release drivers under it.
+        if (!windows || adoption.pending || !app || !app->isAppsSplitTunnelingEnabled()) return false;
+        const auto mode=app->appsRouteMode();
+        return mode!=amnezia::AppsRouteMode::VpnAllApps && !app->vpnApps(mode).isEmpty();
     }
     void preparePermissionsAndBeginCoordinator() {
         if (cancelled || terminal || !preparing || now()>=preflightDeadline || permissionPending || coordinator) return;
@@ -711,7 +770,11 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
             break;
         case ac::State::Failed:
             terminal=true;
-            if (s.error==ac::ErrorCategory::StopUnconfirmed && localStartFailed && !cancelled && !reconnectWanted &&
+            if (appExclusionBlocked && !cancelled) {
+                // Stop of the failed attempt was not confirmed: keep the exact cleanup and its retry hint.
+                if (s.error==ac::ErrorCategory::StopUnconfirmed) { cleanupPending=true; output(Vpn::ConnectionState::Error,cleanupText()); }
+                else output(Vpn::ConnectionState::Error,QString::fromUtf8(kAppExclusionUnavailable));
+            } else if (s.error==ac::ErrorCategory::StopUnconfirmed && localStartFailed && !cancelled && !reconnectWanted &&
                 localStartRetries<recoveryTimingStorage().localStartRetryMs.size()) {
                 // Windows is still failing the adapter (~16 s) so the 3 s stop could not be confirmed.
                 // Not a user-facing cleanup error: confirm the stop after a pause, then restart.
@@ -773,6 +836,9 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
                 // The adopted backend is still being stopped/released: report it when settled.
                 abandonHeldDisconnect=true; phase=QStringLiteral("stopping");
                 output(Vpn::ConnectionState::Disconnecting,QStringLiteral("Завершаем подключение…"));
+            } else if (appExclusionBlocked && !cancelled) {
+                phase=QStringLiteral("failed");
+                output(Vpn::ConnectionState::Error,QString::fromUtf8(kAppExclusionUnavailable));
             } else output(Vpn::ConnectionState::Disconnected,{});
             break;
         }
@@ -1120,6 +1186,13 @@ struct MayakAutoConnectRuntime::Session : QObject, ac::Adapter, ac::Clock,
     void start(ac::CycleId c,ac::AttemptId n,const ac::Allocation& allocation,const ac::Path& path,ac::Millis deadline,StartDone done) override {
         auto a=get(c,n);
         if (!a || cancelled) { done(c,n,{ac::StartStatus::MalformedConfig}); return; }
+        if (!appExclusionBlocked && mayak::split::appExclusionFailedSince(sessionStartMono)) {
+            // The service could not apply app exclusions: no further path (Xray ignores them on Windows).
+            appExclusionBlocked=true; reconnectWanted=false; connectRetryAt=0; localStartFailed=false;
+            logNet(QStringLiteral("event=app_exclusion_unavailable at=path_start"));
+            QTimer::singleShot(0,this,[weak=weak_from_this()] { if (auto self=weak.lock(); self && self->coordinator) self->coordinator->cancel(); });
+            return;
+        }
         if (a->path.kind==ac::PathKind::Awg && a->pathStarts>0 && !a->adopted) a->awgFailedHere=true;
         preparePathStart(a,path);
         // Never start a tunnel while the race engine still runs: wait for its stop (bounded by the
@@ -1656,6 +1729,9 @@ MayakAutoConnectRuntime::~MayakAutoConnectRuntime() {
 MayakAutoConnectRuntime::RecoveryTiming MayakAutoConnectRuntime::recoveryTiming() { return recoveryTimingStorage(); }
 void MayakAutoConnectRuntime::setRecoveryTimingForTests(const RecoveryTiming& timing) { recoveryTimingStorage()=timing; }
 void MayakAutoConnectRuntime::resetFailoverMemoryForTests() { avoidedExitStorage()={}; }
+void MayakAutoConnectRuntime::setSplitPrepareForTests(std::function<void(QObject*, std::function<void(bool, QString)>)> hook) {
+    splitPrepareStorage()=std::move(hook);
+}
 bool MayakAutoConnectRuntime::manages(const QString& id) const { return m_app && m_app->isMayakManagedServer(id); }
 bool MayakAutoConnectRuntime::busy() const { return m_session && (m_session->cleanupPending || !m_session->terminal || m_session->inFlight>0); }
 void MayakAutoConnectRuntime::publish(Vpn::ConnectionState state,const QString& text,const QString& phase,
